@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: bhabhi-thulla-server
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build:server
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: CLIENT_ORIGIN
+        value: https://thulla.joypad.fun

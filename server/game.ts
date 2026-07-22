@@ -37,6 +37,7 @@ interface GameState {
   leaderId: string | null
   currentTurnId: string | null
   firstTrick: boolean
+  takeUsedForLead: boolean
   loserId: string | null
   turnEndsAt: number | null
   activity: ActivityItem[]
@@ -84,7 +85,7 @@ function ensureConnectedHost(room: Room): void {
 function nextActive(room: Room, playerId: string): Player | null {
   const startIndex = room.players.findIndex((player) => player.id === playerId)
   for (let offset = 1; offset <= room.players.length; offset += 1) {
-    const candidate = room.players[(startIndex + offset) % room.players.length]
+    const candidate = room.players[(startIndex - offset + room.players.length) % room.players.length]
     if (!candidate.escaped) return candidate
   }
   return null
@@ -215,11 +216,12 @@ export class GameManager {
       leaderId: opener.id,
       currentTurnId: opener.id,
       firstTrick: true,
+      takeUsedForLead: false,
       loserId: null,
       turnEndsAt: null,
       activity: [],
     }
-    addActivity(room.game, `${opener.name} has the Ace of Spades and opens the game.`)
+    addActivity(room.game, `${opener.name} has the Ace of Spades and opens. Play moves anticlockwise to the right.`)
     this.changed(room)
   }
 
@@ -242,6 +244,7 @@ export class GameManager {
     if (game.trick.length === 1) {
       game.leadSuit = card.suit
       game.leaderId = playerId
+      game.takeUsedForLead = true
     }
 
     if (game.firstTrick) {
@@ -261,6 +264,33 @@ export class GameManager {
       this.resolveCleanTrick(room)
     } else {
       game.currentTurnId = nextActive(room, player.id)?.id ?? null
+    }
+    this.changed(room)
+  }
+
+  takeRightHand(roomCode: string, playerId: string): void {
+    const room = this.requireRoom(roomCode)
+    const game = room.game
+    if (room.status !== 'playing' || !game) throw new Error('There is no active match.')
+    if (game.firstTrick || game.trick.length > 0) throw new Error('You can only take the right-hand player’s cards before leading a new trick.')
+    if (game.currentTurnId !== playerId) throw new Error('Only the player with the power can take the right-hand cards.')
+    if (game.takeUsedForLead) throw new Error('You already used the right-hand option for this trick.')
+
+    const player = room.players.find((candidate) => candidate.id === playerId)
+    const target = nextActive(room, playerId)
+    if (!player || player.escaped || !target || target.id === player.id) throw new Error('There is no active player on your right.')
+
+    const takenCount = target.hand.length
+    player.hand = sortCards([...player.hand, ...target.hand])
+    target.hand = []
+    target.escaped = true
+    game.takeUsedForLead = true
+    game.turnEndsAt = null
+    addActivity(game, `${player.name} took ${takenCount} cards from ${target.name} on the right. ${target.name} got away.`, 'warning')
+
+    if (!this.finishIfOneRemains(room)) {
+      game.currentTurnId = player.id
+      game.leaderId = player.id
     }
     this.changed(room)
   }
@@ -290,6 +320,7 @@ export class GameManager {
     game.leaderId = winner.playerId
     game.currentTurnId = winner.playerId
     game.firstTrick = false
+    game.takeUsedForLead = false
     addActivity(game, 'Opening trick cleared. The Ace of Spades keeps the power.', 'good')
   }
 
@@ -302,6 +333,7 @@ export class GameManager {
     game.trick = []
     game.leadSuit = null
     game.leaderId = winner.id
+    game.takeUsedForLead = false
     this.escapeEmptyPlayers(room, winner.id)
     if (this.finishIfOneRemains(room)) return
     game.currentTurnId = winner.id
@@ -315,6 +347,7 @@ export class GameManager {
     game.trick = []
     game.leadSuit = null
     game.leaderId = winner.id
+    game.takeUsedForLead = false
     this.escapeEmptyPlayers(room, winner.id)
 
     if (this.finishIfOneRemains(room)) {
@@ -329,6 +362,7 @@ export class GameManager {
       game.leadSuit = drawn.suit
       game.leaderId = winner.id
       game.currentTurnId = nextActive(room, winner.id)?.id ?? null
+      game.takeUsedForLead = true
       addActivity(game, `${winner.name} kept the power and drew a card from the waste to lead.`, 'warning')
     } else {
       game.currentTurnId = winner.id
@@ -362,6 +396,17 @@ export class GameManager {
   view(room: Room, viewerId: string): RoomView {
     const viewer = room.players.find((player) => player.id === viewerId)
     if (!viewer) throw new Error('Player is not in this room.')
+    const canTakeRightHand = Boolean(
+      room.status === 'playing'
+      && room.game
+      && !room.game.firstTrick
+      && room.game.trick.length === 0
+      && room.game.currentTurnId === viewerId
+      && !room.game.takeUsedForLead
+      && !viewer.escaped
+      && activePlayers(room).length > 1,
+    )
+    const takeTarget = canTakeRightHand ? nextActive(room, viewerId) : null
     return {
       code: room.code,
       status: room.status,
@@ -391,6 +436,8 @@ export class GameManager {
             currentTurnId: room.game.currentTurnId,
             leaderId: room.game.leaderId,
             firstTrick: room.game.firstTrick,
+            canTakeRightHand,
+            takeTargetId: takeTarget?.id ?? null,
             wasteCount: room.game.waste.length,
             loserId: room.game.loserId,
             turnEndsAt: room.game.turnEndsAt,

@@ -94,6 +94,13 @@ io.on('connection', (socket) => {
     })
   })
 
+  socket.on('game:take-right', (_payload: unknown, ack?: (value: Ack) => void) => {
+    safeAck(ack, () => {
+      manager.takeRightHand(socket.data.roomCode, socket.data.playerId)
+      return undefined
+    })
+  })
+
   socket.on('disconnect', () => {
     manager.disconnect(socket.id)
   })

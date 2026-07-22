@@ -48,6 +48,8 @@ export interface RoomView {
     currentTurnId: string | null
     leaderId: string | null
     firstTrick: boolean
+    canTakeRightHand: boolean
+    takeTargetId: string | null
     wasteCount: number
     loserId: string | null
     turnEndsAt: number | null

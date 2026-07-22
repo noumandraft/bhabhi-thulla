@@ -26,6 +26,15 @@ describe('Pakistani Bhabhi rules', () => {
     expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(1)
   })
 
+  it('moves each turn anticlockwise to the player on the right', () => {
+    const { manager, room } = setupGame(4)
+    const openerIndex = room.players.findIndex((player) => player.id === room.game?.currentTurnId)
+    const opener = room.players[openerIndex]
+    const rightPlayer = room.players[(openerIndex - 1 + room.players.length) % room.players.length]
+    manager.playCard(room.code, opener.id, 'spades-A')
+    expect(room.game?.currentTurnId).toBe(rightPlayer.id)
+  })
+
   it('only allows cards of the led suit when the player can follow', () => {
     const { manager, room } = setupGame(3)
     const game = room.game!
@@ -48,7 +57,7 @@ describe('Pakistani Bhabhi rules', () => {
 
   it('ends a trick on a thulla and makes the highest led suit pick up', () => {
     const { manager, room } = setupGame(3)
-    const [leader, follower, cutter] = room.players
+    const [leader, cutter, follower] = room.players
     Object.assign(room.game!, { firstTrick: false, trick: [], leadSuit: null, currentTurnId: leader.id })
     leader.hand = [{ id: 'hearts-A', suit: 'hearts', rank: 'A' }]
     follower.hand = [
@@ -69,7 +78,7 @@ describe('Pakistani Bhabhi rules', () => {
 
   it('forces a clean-trick winner with no hand to draw and lead from waste', () => {
     const { manager, room } = setupGame(3)
-    const [leader, follower, lastPlayer] = room.players
+    const [leader, lastPlayer, follower] = room.players
     Object.assign(room.game!, {
       firstTrick: false,
       trick: [],
@@ -92,5 +101,35 @@ describe('Pakistani Bhabhi rules', () => {
     expect(leader.escaped).toBe(false)
     expect(room.game?.trick).toEqual([{ playerId: leader.id, card: { id: 'clubs-9', suit: 'clubs', rank: '9' } }])
     expect(room.game?.currentTurnId).toBe(follower.id)
+  })
+
+  it('lets the player with power take the next active right-hand player’s cards before leading', () => {
+    const { manager, room } = setupGame(4)
+    const [leader, , , rightPlayer] = room.players
+    Object.assign(room.game!, {
+      firstTrick: false,
+      trick: [],
+      leadSuit: null,
+      leaderId: leader.id,
+      currentTurnId: leader.id,
+      takeUsedForLead: false,
+    })
+    leader.hand = [{ id: 'diamonds-2', suit: 'diamonds', rank: '2' }]
+    rightPlayer.hand = [
+      { id: 'spades-K', suit: 'spades', rank: 'K' },
+      { id: 'hearts-3', suit: 'hearts', rank: '3' },
+    ]
+
+    const viewBefore = manager.view(room, leader.id)
+    expect(viewBefore.game?.canTakeRightHand).toBe(true)
+    expect(viewBefore.game?.takeTargetId).toBe(rightPlayer.id)
+
+    manager.takeRightHand(room.code, leader.id)
+
+    expect(leader.hand.map((card) => card.id)).toEqual(['spades-K', 'hearts-3', 'diamonds-2'])
+    expect(rightPlayer.hand).toHaveLength(0)
+    expect(rightPlayer.escaped).toBe(true)
+    expect(room.game?.currentTurnId).toBe(leader.id)
+    expect(manager.view(room, leader.id).game?.canTakeRightHand).toBe(false)
   })
 })

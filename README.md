@@ -98,7 +98,7 @@ Multiple allowed frontend origins can be comma-separated in `CLIENT_ORIGIN`. Avo
 
 ## Rules implemented
 
-Cards rank from high to low: A, K, Q, J, 10 through 2. Deal and play move clockwise.
+Cards rank from high to low: A, K, Q, J, 10 through 2. Play moves anticlockwise, so the next turn belongs to the active player on the right.
 
 1. The holder of the Ace of Spades opens with that card.
 2. Every active player contributes to the opening trick. It is discarded even if someone cannot follow Spades.
@@ -106,10 +106,10 @@ Cards rank from high to low: A, K, Q, J, 10 through 2. Deal and play move clockw
 4. A player without the led suit can play any card. This is a thulla and immediately stops the trick.
 5. The highest card of the led suit picks up every card in a thulla trick and leads next.
 6. A clean trick is discarded; its highest led-suit card holds the power and leads next.
-7. A player who empties their hand gets away unless their last card won a clean trick. In that case, they draw a random card from the earlier waste and must lead it.
-8. The last active player is the Bhabhi and loses the round.
-
-The optional traditional rule that allows a player to take a neighbour’s entire hand is intentionally excluded from this first online version because it needs an accept/decline interaction and varies between families.
+7. Before leading a new trick, the player with power may take the entire hand of the next active player on the right. The right-hand player gets away safely; the player who took the cards still leads.
+8. This right-hand option can be used once before that lead, and is unavailable during the opening trick.
+9. A player who empties their hand gets away unless their last card won a clean trick. In that case, they draw a random card from the earlier waste and must lead it.
+10. The last active player is the Bhabhi and loses the round.
 
 ## Free hosting limitation
 

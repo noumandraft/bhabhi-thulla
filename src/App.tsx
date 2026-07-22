@@ -22,6 +22,7 @@ const ChevronRight = (props: IconProps) => <Icon {...props}><path d="m9 18 6-6-6
 const Clock3 = (props: IconProps) => <Icon {...props}><circle cx="12" cy="12" r="9"/><path d="M12 7v5h4"/></Icon>
 const Copy = (props: IconProps) => <Icon {...props}><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></Icon>
 const Crown = (props: IconProps) => <Icon {...props}><path d="m3 6 4 5 5-7 5 7 4-5-2 12H5z"/><path d="M5 21h14"/></Icon>
+const HandCards = (props: IconProps) => <Icon {...props}><rect x="4" y="4" width="11" height="15" rx="2"/><path d="m9 8 2 2 2-2M15 8l3-1a2 2 0 0 1 2.5 1.4l1.4 5.3a2 2 0 0 1-1.4 2.5L15 17.7"/></Icon>
 const LogOut = (props: IconProps) => <Icon {...props}><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/><path d="M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/></Icon>
 const Play = (props: IconProps) => <Icon {...props}><path d="m7 4 13 8L7 20z"/></Icon>
 const RotateCcw = (props: IconProps) => <Icon {...props}><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></Icon>
@@ -114,10 +115,11 @@ function RulesModal({ onClose }: { onClose: () => void }) {
         </div>
         <ol className="rules-list">
           <li><span>1</span><div><b>Ace opens</b><p>The player holding the Ace of Spades must play it first. Everyone plays once; the opening trick is always discarded.</p></div></li>
-          <li><span>2</span><div><b>Follow suit</b><p>After the opening trick, play clockwise. If you hold the led suit, you must play it.</p></div></li>
+          <li><span>2</span><div><b>Move to the right</b><p>Play moves anticlockwise. After each card, the next turn belongs to the active player sitting on the right.</p></div></li>
           <li><span>3</span><div><b>Throw a thulla</b><p>If you cannot follow suit, play any card. The trick ends immediately and the highest card of the led suit picks up the pile.</p></div></li>
           <li><span>4</span><div><b>Keep the power</b><p>The highest card of the led suit leads next. If your last card wins a clean trick, you must draw from the waste and lead it—you cannot escape while holding the power.</p></div></li>
-          <li><span>5</span><div><b>Get away</b><p>Empty your hand without holding the next lead and you are safe. The last player left with cards is the Bhabhi.</p></div></li>
+          <li><span>5</span><div><b>Take the right hand</b><p>When you have the power, before leading a new trick, you may take every card from the next active player on your right. That player gets away safely.</p></div></li>
+          <li><span>6</span><div><b>Get away</b><p>Empty your hand without holding the next lead and you are safe. The last player left with cards is the Bhabhi.</p></div></li>
         </ol>
         <button className="button button--primary button--wide" type="button" onClick={onClose}>Samajh gaya</button>
       </section>
@@ -318,8 +320,11 @@ function GameTable({ room, socket, connected, onOpenRules, onLeave, onToast }: {
   const me = room.players.find((player) => player.isYou)!
   const currentPlayer = room.players.find((player) => player.id === game.currentTurnId)
   const loser = room.players.find((player) => player.id === game.loserId)
+  const takeTarget = room.players.find((player) => player.id === game.takeTargetId)
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
+  const [taking, setTaking] = useState(false)
+  const [takeConfirmOpen, setTakeConfirmOpen] = useState(false)
   const [activityOpen, setActivityOpen] = useState(false)
   const legalIds = new Set(game.legalCardIds)
   const isMyTurn = game.currentTurnId === me.id
@@ -327,6 +332,10 @@ function GameTable({ room, socket, connected, onOpenRules, onLeave, onToast }: {
   useEffect(() => {
     if (selectedCardId && (!game.hand.some((card) => card.id === selectedCardId) || !legalIds.has(selectedCardId))) setSelectedCardId(null)
   }, [game.hand, game.legalCardIds, selectedCardId])
+
+  useEffect(() => {
+    if (!game.canTakeRightHand) setTakeConfirmOpen(false)
+  }, [game.canTakeRightHand])
 
   async function playSelected() {
     if (!selectedCardId || !isMyTurn) return
@@ -342,11 +351,21 @@ function GameTable({ room, socket, connected, onOpenRules, onLeave, onToast }: {
     if (!response.ok) onToast(response.error ?? 'Could not start another round.')
   }
 
+  async function takeRightHand() {
+    if (!game.canTakeRightHand || !takeTarget) return
+    setTaking(true)
+    const response = await emitWithAck(socket, 'game:take-right', {})
+    setTaking(false)
+    setTakeConfirmOpen(false)
+    if (!response.ok) onToast(response.error ?? 'Could not take the right-hand player’s cards.')
+    else onToast(`${takeTarget.name} got away. Their cards are now in your hand.`)
+  }
+
   const tableMessage = room.status === 'finished'
     ? `${loser?.name ?? 'A player'} is the Bhabhi`
     : game.firstTrick
       ? game.trick.length === 0 ? 'Ace of Spades opens' : 'Opening trick — everyone plays'
-      : isMyTurn ? 'Your turn — choose a card' : `${currentPlayer?.name ?? 'Player'} is thinking…`
+      : isMyTurn ? game.canTakeRightHand ? 'Your turn — lead or take the right hand' : 'Your turn — choose a card' : `${currentPlayer?.name ?? 'Player'} is thinking…`
 
   return (
     <main className="game-shell">
@@ -435,14 +454,39 @@ function GameTable({ room, socket, connected, onOpenRules, onLeave, onToast }: {
               {game.hand.length === 0 && <div className="empty-hand"><Check size={24} /><p>{me.escaped ? 'You got away!' : 'Power card is on the table'}</p></div>}
             </div>
           </div>
-          <div className="play-bar">
-            <p>{isMyTurn ? selectedCardId ? 'Card selected — play when ready.' : 'Select one of the raised cards.' : `Waiting for ${currentPlayer?.name ?? 'the next round'}…`}</p>
-            <button className="button button--accent" type="button" disabled={!selectedCardId || !isMyTurn || playing} onClick={playSelected}>
-              {playing ? <span className="spinner" /> : <Play size={18} fill="currentColor" />} Play card
-            </button>
+          <div className={`play-bar ${game.canTakeRightHand ? 'has-take' : ''}`}>
+            <p>{isMyTurn ? selectedCardId ? 'Card selected — play when ready.' : game.canTakeRightHand ? 'Lead a card, or take the next player’s whole hand.' : 'Select one of the raised cards.' : `Waiting for ${currentPlayer?.name ?? 'the next round'}…`}</p>
+            <div className="play-actions">
+              {game.canTakeRightHand && takeTarget && (
+                <button className="button button--take" type="button" disabled={taking || playing} onClick={() => setTakeConfirmOpen(true)}>
+                  <HandCards size={18} /> Take {takeTarget.name}’s hand
+                </button>
+              )}
+              <button className="button button--accent" type="button" disabled={!selectedCardId || !isMyTurn || playing || taking} onClick={playSelected}>
+                {playing ? <span className="spinner" /> : <Play size={18} fill="currentColor" />} Play card
+              </button>
+            </div>
           </div>
         </section>
       </div>
+
+      {takeConfirmOpen && takeTarget && (
+        <div className="modal-scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setTakeConfirmOpen(false)}>
+          <section className="take-sheet" role="dialog" aria-modal="true" aria-labelledby="take-title">
+            <span className="take-sheet__icon"><HandCards size={28} /></span>
+            <span className="eyebrow">Right-hand rule</span>
+            <h2 id="take-title">Take {takeTarget.name}’s {takeTarget.cardCount} card{takeTarget.cardCount === 1 ? '' : 's'}?</h2>
+            <p>{takeTarget.name} will get away safely. Every card in their hand will move to yours, and you will still lead the next trick.</p>
+            {room.players.filter((player) => !player.escaped).length === 2 && <p className="take-sheet__warning">Only two players remain, so taking this hand will make you the Bhabhi.</p>}
+            <div className="take-sheet__actions">
+              <button className="button button--secondary" type="button" disabled={taking} onClick={() => setTakeConfirmOpen(false)}>Cancel</button>
+              <button className="button button--accent" type="button" disabled={taking} onClick={takeRightHand}>
+                {taking ? <span className="spinner" /> : <HandCards size={18} />} Take the hand
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   )
 }

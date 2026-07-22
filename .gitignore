@@ -7,3 +7,5 @@ dist-server/
 *.log
 *.tsbuildinfo
 .DS_Store
+thulla-frontend.zip
+thulla-frontend/

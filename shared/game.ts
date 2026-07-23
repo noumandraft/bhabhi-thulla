@@ -26,10 +26,18 @@ export interface TrickCardView {
   card: Card
 }
 
+export interface ResolvedTrickView {
+  cards: TrickCardView[]
+  kind: 'opening' | 'clean' | 'thulla'
+  winnerId: string
+  lastPlayerId: string
+}
+
 export interface ActivityItem {
   id: string
   text: string
   tone: 'neutral' | 'good' | 'warning'
+  kind?: 'general' | 'thulla' | 'power' | 'escape' | 'take' | 'round'
 }
 
 export interface RoomView {
@@ -44,6 +52,7 @@ export interface RoomView {
     hand: Card[]
     legalCardIds: string[]
     trick: TrickCardView[]
+    resolvedTrick: ResolvedTrickView | null
     leadSuit: Suit | null
     currentTurnId: string | null
     leaderId: string | null

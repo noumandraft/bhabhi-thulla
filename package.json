@@ -12,6 +12,7 @@
     "build:server": "tsc -p tsconfig.server.json",
     "start": "node dist-server/server/index.js",
     "test": "vitest run server",
+    "qa:visual": "node scripts/visual-qa.mjs",
     "test:watch": "vitest server"
   },
   "engines": {

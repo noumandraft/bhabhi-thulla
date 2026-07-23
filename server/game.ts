@@ -30,8 +30,16 @@ interface TrickCard {
   card: Card
 }
 
+interface ResolvedTrick {
+  cards: TrickCard[]
+  kind: 'opening' | 'clean' | 'thulla'
+  winnerId: string
+  lastPlayerId: string
+}
+
 interface GameState {
   trick: TrickCard[]
+  resolvedTrick: ResolvedTrick | null
   waste: Card[]
   leadSuit: Suit | null
   leaderId: string | null
@@ -98,8 +106,13 @@ function highestLedCard(trick: TrickCard[], leadSuit: Suit): TrickCard {
   )
 }
 
-function addActivity(game: GameState, text: string, tone: ActivityItem['tone'] = 'neutral'): void {
-  game.activity.unshift({ id: randomUUID(), text, tone })
+function addActivity(
+  game: GameState,
+  text: string,
+  tone: ActivityItem['tone'] = 'neutral',
+  kind: NonNullable<ActivityItem['kind']> = 'general',
+): void {
+  game.activity.unshift({ id: randomUUID(), text, tone, kind })
   game.activity = game.activity.slice(0, 12)
 }
 
@@ -211,6 +224,7 @@ export class GameManager {
     room.status = 'playing'
     room.game = {
       trick: [],
+      resolvedTrick: null,
       waste: [],
       leadSuit: null,
       leaderId: opener.id,
@@ -237,6 +251,7 @@ export class GameManager {
     if (!card) throw new Error('You must follow the led suit when you can.')
 
     game.turnEndsAt = null
+    game.resolvedTrick = null
     player.hand = player.hand.filter((candidate) => candidate.id !== card.id)
     game.trick.push({ playerId, card })
     if (automatic) addActivity(game, `${player.name} ran out of time; ${card.rank} of ${card.suit} was played automatically.`, 'warning')
@@ -286,7 +301,7 @@ export class GameManager {
     target.escaped = true
     game.takeUsedForLead = true
     game.turnEndsAt = null
-    addActivity(game, `${player.name} took ${takenCount} cards from ${target.name} on the right. ${target.name} got away.`, 'warning')
+    addActivity(game, `${player.name} took ${takenCount} cards from ${target.name} on the right. ${target.name} got away.`, 'warning', 'take')
 
     if (!this.finishIfOneRemains(room)) {
       game.currentTurnId = player.id
@@ -314,22 +329,36 @@ export class GameManager {
       return
     }
     const winner = highestLedCard(game.trick, 'spades')
-    game.waste.push(...game.trick.map((entry) => entry.card))
+    const completed = [...game.trick]
+    game.resolvedTrick = {
+      cards: completed,
+      kind: 'opening',
+      winnerId: winner.playerId,
+      lastPlayerId: player.id,
+    }
+    game.waste.push(...completed.map((entry) => entry.card))
     game.trick = []
     game.leadSuit = null
     game.leaderId = winner.playerId
     game.currentTurnId = winner.playerId
     game.firstTrick = false
     game.takeUsedForLead = false
-    addActivity(game, 'Opening trick cleared. The Ace of Spades keeps the power.', 'good')
+    addActivity(game, 'Opening trick cleared. The Ace of Spades keeps the power.', 'good', 'power')
   }
 
   private resolveThulla(room: Room, thullaPlayer: Player): void {
     const game = room.game!
-    const winnerEntry = highestLedCard(game.trick, game.leadSuit!)
+    const completed = [...game.trick]
+    const winnerEntry = highestLedCard(completed, game.leadSuit!)
     const winner = room.players.find((player) => player.id === winnerEntry.playerId)!
-    winner.hand = sortCards([...winner.hand, ...game.trick.map((entry) => entry.card)])
-    addActivity(game, `${thullaPlayer.name} played a THULLA! ${winner.name} picked up ${game.trick.length} cards.`, 'warning')
+    winner.hand = sortCards([...winner.hand, ...completed.map((entry) => entry.card)])
+    game.resolvedTrick = {
+      cards: completed,
+      kind: 'thulla',
+      winnerId: winner.id,
+      lastPlayerId: thullaPlayer.id,
+    }
+    addActivity(game, `${thullaPlayer.name} played a THULLA! ${winner.name} picked up ${completed.length} cards.`, 'warning', 'thulla')
     game.trick = []
     game.leadSuit = null
     game.leaderId = winner.id
@@ -344,6 +373,12 @@ export class GameManager {
     const completed = [...game.trick]
     const winnerEntry = highestLedCard(completed, game.leadSuit!)
     const winner = room.players.find((player) => player.id === winnerEntry.playerId)!
+    game.resolvedTrick = {
+      cards: completed,
+      kind: 'clean',
+      winnerId: winner.id,
+      lastPlayerId: completed[completed.length - 1].playerId,
+    }
     game.trick = []
     game.leadSuit = null
     game.leaderId = winner.id
@@ -363,10 +398,10 @@ export class GameManager {
       game.leaderId = winner.id
       game.currentTurnId = nextActive(room, winner.id)?.id ?? null
       game.takeUsedForLead = true
-      addActivity(game, `${winner.name} kept the power and drew a card from the waste to lead.`, 'warning')
+      addActivity(game, `${winner.name} kept the power and drew a card from the waste to lead.`, 'warning', 'power')
     } else {
       game.currentTurnId = winner.id
-      addActivity(game, `${winner.name} won the trick and has the power.`)
+      addActivity(game, `${winner.name} won the trick and has the power.`, 'neutral', 'power')
     }
     game.waste.push(...completed.map((entry) => entry.card))
   }
@@ -375,7 +410,7 @@ export class GameManager {
     for (const player of room.players) {
       if (!player.escaped && player.id !== exceptPlayerId && player.hand.length === 0) {
         player.escaped = true
-        addActivity(room.game!, `${player.name} got away and is safe!`, 'good')
+        addActivity(room.game!, `${player.name} got away and is safe!`, 'good', 'escape')
       }
     }
   }
@@ -389,7 +424,7 @@ export class GameManager {
     room.game!.currentTurnId = null
     room.game!.turnEndsAt = null
     ensureConnectedHost(room)
-    if (loser) addActivity(room.game!, `${loser.name} is the Bhabhi!`, 'warning')
+    if (loser) addActivity(room.game!, `${loser.name} is the Bhabhi!`, 'warning', 'round')
     return true
   }
 
@@ -432,6 +467,16 @@ export class GameManager {
               playerName: room.players.find((player) => player.id === entry.playerId)?.name ?? 'Player',
               card: entry.card,
             })),
+            resolvedTrick: room.game.resolvedTrick
+              ? {
+                  ...room.game.resolvedTrick,
+                  cards: room.game.resolvedTrick.cards.map((entry) => ({
+                    playerId: entry.playerId,
+                    playerName: room.players.find((player) => player.id === entry.playerId)?.name ?? 'Player',
+                    card: entry.card,
+                  })),
+                }
+              : null,
             leadSuit: room.game.leadSuit,
             currentTurnId: room.game.currentTurnId,
             leaderId: room.game.leaderId,

@@ -4,11 +4,12 @@ import {
   sortCards,
   suitLabel,
   suitSymbol,
-  type Ack,
   type Card as CardType,
   type RoomCredentials,
   type RoomView,
 } from '../shared/game'
+import RedesignedGameTable from './components/GameTable'
+import { emitWithAck } from './socket'
 
 type IconProps = SVGProps<SVGSVGElement> & { size?: number }
 
@@ -55,16 +56,6 @@ function getSavedCredentials(code: string): RoomCredentials | null {
 function saveCredentials(credentials: RoomCredentials): void {
   localStorage.setItem(`thulla:seat:${credentials.code}`, JSON.stringify(credentials))
   window.history.replaceState({}, '', `${window.location.pathname}?room=${credentials.code}`)
-}
-
-function emitWithAck<T>(socket: Socket, event: string, payload: unknown): Promise<Ack<T>> {
-  return new Promise((resolve) => {
-    const timeout = window.setTimeout(() => resolve({ ok: false, error: 'The server took too long to respond. Try again.' }), 12_000)
-    socket.emit(event, payload, (response: Ack<T>) => {
-      window.clearTimeout(timeout)
-      resolve(response)
-    })
-  })
 }
 
 function Logo({ compact = false }: { compact?: boolean }) {
@@ -573,7 +564,7 @@ export default function App() {
       ) : room.status === 'lobby' ? (
         <Lobby room={room} socket={socket} onOpenRules={() => setRulesOpen(true)} onLeave={leaveRoom} onToast={setToast} />
       ) : (
-        <GameTable room={room} socket={socket} connected={connected} onOpenRules={() => setRulesOpen(true)} onLeave={leaveRoom} onToast={setToast} />
+        <RedesignedGameTable room={room} socket={socket} connected={connected} onOpenRules={() => setRulesOpen(true)} onLeave={leaveRoom} onToast={setToast} />
       )}
       {rulesOpen && <RulesModal onClose={() => setRulesOpen(false)} />}
       {toast && <div className="toast" role="status" aria-live="polite"><Check size={18} /> {toast}</div>}

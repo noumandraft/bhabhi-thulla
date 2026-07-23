@@ -74,6 +74,20 @@ describe('Pakistani Bhabhi rules', () => {
     expect(room.game?.trick).toHaveLength(0)
     expect(leader.hand).toHaveLength(3)
     expect(room.game?.currentTurnId).toBe(leader.id)
+    expect(room.game?.activity[0]).toMatchObject({ kind: 'thulla', tone: 'warning' })
+    expect(manager.view(room, leader.id).game?.resolvedTrick).toMatchObject({
+      kind: 'thulla',
+      winnerId: leader.id,
+      lastPlayerId: cutter.id,
+    })
+    expect(manager.view(room, leader.id).game?.resolvedTrick?.cards.map((entry) => entry.card.id)).toEqual([
+      'hearts-A',
+      'hearts-K',
+      'diamonds-2',
+    ])
+
+    manager.playCard(room.code, leader.id, 'diamonds-2')
+    expect(manager.view(room, leader.id).game?.resolvedTrick).toBeNull()
   })
 
   it('forces a clean-trick winner with no hand to draw and lead from waste', () => {
@@ -101,6 +115,11 @@ describe('Pakistani Bhabhi rules', () => {
     expect(leader.escaped).toBe(false)
     expect(room.game?.trick).toEqual([{ playerId: leader.id, card: { id: 'clubs-9', suit: 'clubs', rank: '9' } }])
     expect(room.game?.currentTurnId).toBe(follower.id)
+    expect(manager.view(room, follower.id).game?.resolvedTrick).toMatchObject({
+      kind: 'clean',
+      winnerId: leader.id,
+      lastPlayerId: lastPlayer.id,
+    })
   })
 
   it('lets the player with power take the next active right-hand player’s cards before leading', () => {
@@ -131,5 +150,6 @@ describe('Pakistani Bhabhi rules', () => {
     expect(rightPlayer.escaped).toBe(true)
     expect(room.game?.currentTurnId).toBe(leader.id)
     expect(manager.view(room, leader.id).game?.canTakeRightHand).toBe(false)
+    expect(room.game?.activity[0]).toMatchObject({ kind: 'take', tone: 'warning' })
   })
 })

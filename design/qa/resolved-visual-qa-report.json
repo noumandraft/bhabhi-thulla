@@ -1,0 +1,128 @@
+{
+  "scenario": "resolved",
+  "room": "XKWXH",
+  "playerId": "23268abd-5713-4b70-b074-7d42bf463318",
+  "consoleErrors": null,
+  "results": [
+    {
+      "outputPath": "C:\\Users\\Hp\\Documents\\Getaway\\design\\qa\\resolved-desktop-1440x900.png",
+      "viewport": [
+        1440,
+        900
+      ],
+      "pageOverflowX": false,
+      "pageOverflowY": false,
+      "rightSeatVisible": true,
+      "resolutionText": "OPENING CLEAREDLast card: Ayesha",
+      "visibleTrickCards": 8,
+      "lastCardVisible": true,
+      "controls": [
+        {
+          "label": "Copy room code XKWXH",
+          "width": 167,
+          "height": 44
+        },
+        {
+          "label": "How to play",
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Leave table",
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Take Mehwish’s 5",
+          "width": 205,
+          "height": 48
+        },
+        {
+          "label": "Select a card",
+          "width": 164,
+          "height": 48
+        }
+      ]
+    },
+    {
+      "outputPath": "C:\\Users\\Hp\\Documents\\Getaway\\design\\qa\\resolved-mobile-375x812.png",
+      "viewport": [
+        375,
+        812
+      ],
+      "pageOverflowX": false,
+      "pageOverflowY": false,
+      "rightSeatVisible": true,
+      "resolutionText": "OPENING CLEAREDLast card: Ayesha",
+      "visibleTrickCards": 8,
+      "lastCardVisible": true,
+      "controls": [
+        {
+          "label": "Copy room code XKWXH",
+          "width": 108,
+          "height": 44
+        },
+        {
+          "label": "How to play",
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Leave table",
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Take Mehwish’s 5",
+          "width": 176,
+          "height": 52
+        },
+        {
+          "label": "Select a card",
+          "width": 176,
+          "height": 52
+        }
+      ]
+    },
+    {
+      "outputPath": "C:\\Users\\Hp\\Documents\\Getaway\\design\\qa\\resolved-landscape-844x390.png",
+      "viewport": [
+        844,
+        390
+      ],
+      "pageOverflowX": false,
+      "pageOverflowY": false,
+      "rightSeatVisible": true,
+      "resolutionText": "OPENING CLEAREDLast card: Ayesha",
+      "visibleTrickCards": 8,
+      "lastCardVisible": true,
+      "controls": [
+        {
+          "label": "Copy room code XKWXH",
+          "width": 168,
+          "height": 44
+        },
+        {
+          "label": "How to play",
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Leave table",
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Take Mehwish’s 5",
+          "width": 146,
+          "height": 68
+        },
+        {
+          "label": "Select a card",
+          "width": 158,
+          "height": 68
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "room": "HCPHK",
+  "playerId": "7c3866f3-e10d-4efe-88d3-01c115a717dd",
+  "consoleErrors": null,
+  "results": [
+    {
+      "outputPath": "C:\\Users\\Hp\\Documents\\Getaway\\design\\qa\\desktop-1440x900.png",
+      "viewport": [
+        1440,
+        900
+      ],
+      "pageOverflowX": false,
+      "pageOverflowY": false,
+      "rightSeatVisible": true,
+      "controls": [
+        {
+          "label": "Copy room code HCPHK",
+          "width": 162,
+          "height": 44
+        },
+        {
+          "label": "How to play",
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Leave table",
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Play A♠",
+          "width": 158,
+          "height": 48
+        }
+      ]
+    },
+    {
+      "outputPath": "C:\\Users\\Hp\\Documents\\Getaway\\design\\qa\\mobile-375x812.png",
+      "viewport": [
+        375,
+        812
+      ],
+      "pageOverflowX": false,
+      "pageOverflowY": false,
+      "rightSeatVisible": true,
+      "controls": [
+        {
+          "label": "Copy room code HCPHK",
+          "width": 104,
+          "height": 44
+        },
+        {
+          "label": "How to play",
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Leave table",
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Play A♠",
+          "width": 359,
+          "height": 52
+        }
+      ]
+    },
+    {
+      "outputPath": "C:\\Users\\Hp\\Documents\\Getaway\\design\\qa\\landscape-844x390.png",
+      "viewport": [
+        844,
+        390
+      ],
+      "pageOverflowX": false,
+      "pageOverflowY": false,
+      "rightSeatVisible": true,
+      "controls": [
+        {
+          "label": "Copy room code HCPHK",
+          "width": 163,
+          "height": 44
+        },
+        {
+          "label": "How to play",
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Leave table",
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Play A♠",
+          "width": 158,
+          "height": 44
+        }
+      ]
+    }
+  ]
+}

@@ -43,6 +43,8 @@ npm run build
 npm start
 ```
 
+With `npm run dev` already running, `npm run qa:visual` creates an eight-player local match and verifies the real game table at desktop, mobile portrait, and mobile landscape sizes. Screenshots and the overflow/touch-target report are saved in `design/qa/`.
+
 `npm run build` creates:
 
 - `dist/` — static frontend files for Hostinger

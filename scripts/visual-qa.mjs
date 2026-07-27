@@ -8,7 +8,11 @@ const SERVER_URL = process.env.QA_SERVER_URL ?? 'http://localhost:3001'
 const CLIENT_URL = process.env.QA_CLIENT_URL ?? 'http://localhost:5173'
 const OUTPUT_DIR = resolve(process.env.QA_OUTPUT_DIR ?? 'design/qa')
 const DEBUG_PORT = Number(process.env.QA_CHROME_PORT ?? 9333)
-const SCENARIO = process.env.QA_SCENARIO === 'resolved' ? 'resolved' : 'active'
+const VIEWPORTS = [
+  { name: 'desktop', width: 1440, height: 900 },
+  { name: 'mobile', width: 375, height: 812 },
+  { name: 'landscape', width: 844, height: 390 },
+]
 const chromeCandidates = [
   process.env.CHROME_PATH,
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
@@ -16,6 +20,8 @@ const chromeCandidates = [
   '/usr/bin/google-chrome',
   '/usr/bin/chromium',
 ].filter(Boolean)
+
+const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds))
 
 async function firstExisting(paths) {
   for (const path of paths) {
@@ -34,8 +40,8 @@ function emitAck(socket, event, payload) {
     const timeout = setTimeout(() => reject(new Error(`${event} timed out`)), 8_000)
     socket.emit(event, payload, (response) => {
       clearTimeout(timeout)
-      if (response.ok) resolveAck(response.data)
-      else reject(new Error(response.error ?? `${event} failed`))
+      if (response?.ok) resolveAck(response.data)
+      else reject(new Error(response?.error ?? `${event} failed`))
     })
   })
 }
@@ -49,7 +55,7 @@ async function connectedSocket() {
   return socket
 }
 
-async function waitForJson(url, attempts = 60) {
+async function waitForJson(url, attempts = 80) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const response = await fetch(url)
@@ -57,7 +63,7 @@ async function waitForJson(url, attempts = 60) {
     } catch {
       // Chrome is still starting.
     }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 150))
+    await delay(150)
   }
   throw new Error(`Timed out waiting for ${url}`)
 }
@@ -67,6 +73,7 @@ class CdpClient {
     this.socket = new WebSocket(url)
     this.id = 0
     this.pending = new Map()
+    this.events = []
   }
 
   async open() {
@@ -76,7 +83,11 @@ class CdpClient {
     })
     this.socket.addEventListener('message', (event) => {
       const message = JSON.parse(event.data)
-      if (!message.id || !this.pending.has(message.id)) return
+      if (!message.id) {
+        this.events.push(message)
+        return
+      }
+      if (!this.pending.has(message.id)) return
       const { resolveMessage, reject } = this.pending.get(message.id)
       this.pending.delete(message.id)
       if (message.error) reject(new Error(message.error.message))
@@ -99,102 +110,135 @@ class CdpClient {
 
 async function evaluate(cdp, expression) {
   const response = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
-  if (response.exceptionDetails) throw new Error(response.exceptionDetails.text)
+  if (response.exceptionDetails) {
+    throw new Error(response.exceptionDetails.exception?.description ?? response.exceptionDetails.text)
+  }
   return response.result.value
 }
 
-async function waitForExpression(cdp, expression, attempts = 80) {
+async function waitForExpression(cdp, expression, attempts = 100) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (await evaluate(cdp, expression)) return
-    await new Promise((resolveWait) => setTimeout(resolveWait, 150))
+    await delay(100)
   }
   throw new Error(`Timed out waiting for: ${expression}`)
 }
 
-async function capture(cdp, name, width, height) {
-  await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width <= 620 })
-  await new Promise((resolveWait) => setTimeout(resolveWait, 180))
-  const diagnostics = await evaluate(cdp, `(() => {
-    const root = document.documentElement
-    const rightSeat = document.querySelector('.game-v2-seat.is-right-player')
-    const resolution = document.querySelector('.game-v2-resolution')
-    const lastCard = document.querySelector('.game-v2-trick-card.is-last-played')
-    const controls = [...document.querySelectorAll('.game-v2-header button, .game-v2-actions button')]
-      .map((element) => {
-        const box = element.getBoundingClientRect()
-        return { label: element.getAttribute('aria-label') || element.textContent.trim(), width: Math.round(box.width), height: Math.round(box.height) }
-      })
-    const rightBox = rightSeat?.getBoundingClientRect()
-    return {
-      viewport: [innerWidth, innerHeight],
-      pageOverflowX: root.scrollWidth > innerWidth,
-      pageOverflowY: root.scrollHeight > innerHeight,
-      rightSeatVisible: rightBox ? rightBox.right > 0 && rightBox.left < innerWidth && rightBox.bottom > 0 && rightBox.top < innerHeight : false,
-      resolutionText: resolution?.textContent.trim() ?? null,
-      visibleTrickCards: document.querySelectorAll('.game-v2-trick-card').length,
-      lastCardVisible: Boolean(lastCard),
-      controls,
+async function setViewport(cdp, width, height) {
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width,
+    height,
+    deviceScaleFactor: 1,
+    mobile: width <= 620,
+  })
+  await delay(60)
+}
+
+const diagnosticsExpression = `(() => {
+  const root = document.documentElement
+  const visible = (element) => {
+    const style = getComputedStyle(element)
+    const box = element.getBoundingClientRect()
+    return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0
+      && box.right > 0 && box.left < innerWidth && box.bottom > 0 && box.top < innerHeight
+  }
+  const named = (element) => {
+    if (element.getAttribute('aria-label')?.trim()) return true
+    if (element.getAttribute('aria-labelledby')?.trim()) return true
+    if (element.textContent?.trim()) return true
+    if (element instanceof HTMLInputElement) {
+      return Boolean(element.labels?.length || element.title || element.placeholder)
     }
-  })()`)
+    return false
+  }
+  const interactive = [...document.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])')]
+    .filter(visible)
+  const controls = interactive.map((element) => {
+    const labelledTarget = element.matches('input[type="checkbox"], input[type="radio"]') ? element.closest('label') : null
+    const box = (labelledTarget ?? element).getBoundingClientRect()
+    return {
+      label: element.getAttribute('aria-label') || element.textContent?.trim().replace(/\\s+/g, ' ').slice(0, 80) || element.id || element.tagName,
+      width: Math.round(box.width),
+      height: Math.round(box.height),
+    }
+  })
+  const ids = [...document.querySelectorAll('[id]')].map((element) => element.id)
+  const duplicateIds = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))]
+  const rightSeat = document.querySelector('.game-v2-seat.is-right-player')
+  const rightBox = rightSeat?.getBoundingClientRect()
+  const resolution = document.querySelector('.game-v2-resolution, [data-game-phase="resolving"]')
+  const lastCard = document.querySelector('.game-v2-trick-card.is-last-played')
+  return {
+    viewport: [innerWidth, innerHeight],
+    pageOverflowX: root.scrollWidth > innerWidth + 1,
+    pageOverflowY: root.scrollHeight > innerHeight + 1,
+    rightSeatVisible: rightBox ? rightBox.right > 0 && rightBox.left < innerWidth && rightBox.bottom > 0 && rightBox.top < innerHeight : null,
+    resolutionText: resolution?.textContent?.trim().replace(/\\s+/g, ' ') ?? null,
+    visibleTrickCards: document.querySelectorAll('.game-v2-trick-card').length,
+    lastCardVisible: Boolean(lastCard),
+    clockVisible: Boolean(document.querySelector('.game-v2-clock, .turn-clock')),
+    emptyTrickVisible: Boolean(document.querySelector('.game-v2-empty-trick')),
+    focusableDisplayCards: document.querySelectorAll('.game-v2-trick button, .game-v2-waste button, .waste-stack button, .current-trick button').length,
+    touchViolations: controls.filter((control) => control.width < 44 || control.height < 44),
+    unnamedControls: interactive.filter((element) => !named(element)).map((element) => element.outerHTML.slice(0, 160)),
+    duplicateIds,
+    controls,
+  }
+})()`
+
+async function capture(cdp, name, width, height) {
+  await setViewport(cdp, width, height)
+  const diagnostics = await evaluate(cdp, diagnosticsExpression)
   const screenshot = await cdp.send('Page.captureScreenshot', { format: 'png', fromSurface: true })
   const outputPath = join(OUTPUT_DIR, `${name}-${width}x${height}.png`)
   await writeFile(outputPath, Buffer.from(screenshot.data, 'base64'))
   return { outputPath, ...diagnostics }
 }
 
+function waitForState(socket, latestStates, predicate, timeoutMs = 10_000) {
+  const current = latestStates.get(socket)
+  if (current && predicate(current)) return Promise.resolve(current)
+  return new Promise((resolveState, reject) => {
+    const timeout = setTimeout(() => {
+      socket.off('room:state', onState)
+      reject(new Error('Timed out waiting for a matching room state.'))
+    }, timeoutMs)
+    const onState = (state) => {
+      if (!predicate(state)) return
+      clearTimeout(timeout)
+      socket.off('room:state', onState)
+      resolveState(state)
+    }
+    socket.on('room:state', onState)
+  })
+}
+
+function browserProblems(cdp) {
+  return cdp.events.flatMap((event) => {
+    if (event.method === 'Runtime.exceptionThrown') {
+      return [event.params.exceptionDetails.exception?.description ?? event.params.exceptionDetails.text]
+    }
+    if (event.method === 'Runtime.consoleAPICalled' && ['error', 'assert'].includes(event.params.type)) {
+      return [event.params.args.map((argument) => argument.value ?? argument.description).join(' ')]
+    }
+    return []
+  })
+}
+
 const sockets = []
 const participants = []
 const latestStates = new Map()
+const failures = []
 let chrome
+let cdp
 const profile = resolve(join(tmpdir(), `bhabhi-thulla-ui-qa-${Date.now()}`))
+
+function assert(condition, message) {
+  if (!condition) failures.push(message)
+}
 
 try {
   await mkdir(OUTPUT_DIR, { recursive: true })
-  const host = await connectedSocket()
-  sockets.push(host)
-  host.on('room:state', (state) => latestStates.set(host, state))
-  const hostCredentials = await emitAck(host, 'room:create', { name: 'Nouman' })
-  participants.push({ socket: host, credentials: hostCredentials })
-  for (const name of ['Ayesha', 'Bilal', 'Hira', 'Hamza', 'Sana', 'Danish', 'Mehwish']) {
-    const socket = await connectedSocket()
-    sockets.push(socket)
-    socket.on('room:state', (state) => latestStates.set(socket, state))
-    const credentials = await emitAck(socket, 'room:join', { code: hostCredentials.code, name })
-    participants.push({ socket, credentials })
-  }
-  function waitForState(socket, predicate) {
-    const current = latestStates.get(socket)
-    if (current && predicate(current)) return Promise.resolve(current)
-    return new Promise((resolveState) => {
-      const onState = (state) => {
-        if (!predicate(state)) return
-        socket.off('room:state', onState)
-        resolveState(state)
-      }
-      socket.on('room:state', onState)
-    })
-  }
-  const playingState = waitForState(host, (state) => state.status === 'playing')
-  await emitAck(host, 'game:start', {})
-  let room = await playingState
-  if (SCENARIO === 'resolved') {
-    while (!room.game.resolvedTrick) {
-      const turnId = room.game.currentTurnId
-      const turnParticipant = participants.find(({ credentials }) => credentials.playerId === turnId)
-      if (!turnParticipant) throw new Error('Could not identify the next player in the opening trick.')
-      const turnState = await waitForState(turnParticipant.socket, (state) => state.game?.currentTurnId === turnId)
-      const cardId = turnState.game.legalCardIds[0]
-      if (!cardId) throw new Error('The opening player had no legal card.')
-      const nextState = waitForState(host, (state) => state.game?.resolvedTrick || state.game?.currentTurnId !== turnId)
-      await emitAck(turnParticipant.socket, 'game:play', { cardId })
-      room = await nextState
-    }
-  }
-  const activeParticipant = participants.find(({ credentials }) => credentials.playerId === room.game.currentTurnId)
-  if (!activeParticipant) throw new Error('Could not identify the opening player.')
-  const credentials = activeParticipant.credentials
-  activeParticipant.socket.disconnect()
-
   const chromePath = await firstExisting(chromeCandidates)
   chrome = spawn(chromePath, [
     '--headless=new',
@@ -208,51 +252,211 @@ try {
     'about:blank',
   ], { stdio: 'ignore', windowsHide: true })
 
-  const targetsUrl = `http://127.0.0.1:${DEBUG_PORT}/json/list`
-  const targets = await waitForJson(targetsUrl)
+  const targets = await waitForJson(`http://127.0.0.1:${DEBUG_PORT}/json/list`)
   const page = targets.find((target) => target.type === 'page')
   if (!page) throw new Error('Chrome did not expose a page target.')
-  const cdp = new CdpClient(page.webSocketDebuggerUrl)
+  cdp = new CdpClient(page.webSocketDebuggerUrl)
   await cdp.open()
   await cdp.send('Page.enable')
   await cdp.send('Runtime.enable')
   await cdp.send('Page.navigate', { url: CLIENT_URL })
   await waitForExpression(cdp, `location.origin === ${JSON.stringify(CLIENT_URL)}`)
-  const storedCredentials = JSON.stringify(credentials)
-  await evaluate(cdp, `localStorage.setItem(${JSON.stringify(`thulla:seat:${credentials.code}`)}, ${JSON.stringify(storedCredentials)})`)
-  await cdp.send('Page.navigate', { url: `${CLIENT_URL}/?room=${credentials.code}` })
+  await evaluate(cdp, `localStorage.setItem('thulla:preferences:v1', JSON.stringify({ tutorialComplete: true }))`)
+  await cdp.send('Page.navigate', { url: CLIENT_URL })
+  await waitForExpression(cdp, `Boolean(document.querySelector('.landing-shell'))`)
+  await waitForExpression(cdp, `document.querySelector('.connection-label')?.dataset.connected === 'true'`)
+
+  const landing = await capture(cdp, 'landing-mobile', 375, 812)
+  const landingCta = await evaluate(cdp, `(() => {
+    const panel = document.querySelector('.join-card')?.getBoundingClientRect()
+    const cta = document.querySelector('.join-card button[type="submit"]')?.getBoundingClientRect()
+    return panel && cta ? {
+      panelTop: Math.round(panel.top),
+      ctaTop: Math.round(cta.top),
+      ctaBottom: Math.round(cta.bottom),
+      ctaWithinFirstViewport: cta.top < innerHeight,
+    } : null
+  })()`)
+  assert(Boolean(landingCta), 'The mobile landing page did not expose its primary create-room action.')
+  assert(landingCta?.ctaWithinFirstViewport, `The mobile create-room CTA starts below the first viewport (${landingCta?.ctaTop}px).`)
+  assert(!landing.pageOverflowX, 'The 375px landing page has horizontal overflow.')
+  assert(landing.touchViolations.length === 0, `The mobile landing page has touch targets under 44px: ${JSON.stringify(landing.touchViolations)}`)
+  assert(landing.unnamedControls.length === 0, 'The mobile landing page has unnamed interactive controls.')
+
+  const fixtureDefinitions = [
+    { mode: 'lobby', selector: '.lobby-shell' },
+    { mode: 'resolving', selector: '.game-v2-resolution' },
+    { mode: 'reconnect', selector: '.game-v2-reconnect-banner' },
+    { mode: 'finished', selector: '.game-v2-result' },
+  ]
+  const fixtureResults = {}
+  for (const fixture of fixtureDefinitions) {
+    await cdp.send('Page.navigate', { url: `${CLIENT_URL}/?qa=${fixture.mode}` })
+    await waitForExpression(cdp, `Boolean(document.querySelector(${JSON.stringify(fixture.selector)}))`)
+    const portrait = await capture(cdp, `fixture-${fixture.mode}-mobile`, 390, 844)
+    const landscape = await capture(cdp, `fixture-${fixture.mode}-landscape`, 844, 390)
+    fixtureResults[fixture.mode] = { portrait, landscape }
+    for (const result of [portrait, landscape]) {
+      assert(!result.pageOverflowX, `${fixture.mode} fixture has horizontal overflow at ${result.viewport.join('x')}.`)
+      assert(result.touchViolations.length === 0, `${fixture.mode} fixture has touch targets under 44px at ${result.viewport.join('x')}: ${JSON.stringify(result.touchViolations)}`)
+      assert(result.unnamedControls.length === 0, `${fixture.mode} fixture has unnamed controls at ${result.viewport.join('x')}.`)
+      assert(result.duplicateIds.length === 0, `${fixture.mode} fixture has duplicate IDs at ${result.viewport.join('x')}.`)
+    }
+  }
+  assert(fixtureResults.resolving.portrait.lastCardVisible, 'The resolving fixture does not identify the THULLA card.')
+  assert(!fixtureResults.resolving.portrait.clockVisible, 'The resolving fixture displays a running timer.')
+  assert(!fixtureResults.reconnect.portrait.clockVisible, 'The reconnect fixture displays a running timer.')
+
+  await cdp.send('Page.navigate', { url: CLIENT_URL })
+  await waitForExpression(cdp, `Boolean(document.querySelector('.landing-shell'))`)
+
+  const host = await connectedSocket()
+  sockets.push(host)
+  host.on('room:state', (state) => latestStates.set(host, state))
+  const hostCredentials = await emitAck(host, 'room:create', { name: 'Nouman' })
+  participants.push({ socket: host, credentials: hostCredentials })
+  for (const name of ['Ayesha', 'Bilal', 'Hira', 'Hamza', 'Sana', 'Danish', 'Mehwish']) {
+    const socket = await connectedSocket()
+    sockets.push(socket)
+    socket.on('room:state', (state) => latestStates.set(socket, state))
+    const credentials = await emitAck(socket, 'room:join', { code: hostCredentials.code, name })
+    participants.push({ socket, credentials })
+  }
+
+  for (const participant of participants) {
+    await emitAck(participant.socket, 'room:ready', { ready: true })
+  }
+
+  const playingState = waitForState(host, latestStates, (state) => state.status === 'playing')
+  await emitAck(host, 'game:start', {})
+  let room = await playingState
+
+  while (room.game?.phase !== 'resolving' && room.game?.trick.length < room.players.length - 1) {
+    const turnId = room.game?.currentTurnId
+    const participant = participants.find(({ credentials }) => credentials.playerId === turnId)
+    if (!participant || !turnId) throw new Error('Could not identify a player while preparing the opening trick.')
+    const playerState = await waitForState(participant.socket, latestStates, (state) => state.game?.currentTurnId === turnId)
+    const cardId = playerState.game?.legalCardIds[0]
+    if (!cardId) throw new Error('The current player had no legal opening card.')
+    const previousLength = room.game.trick.length
+    const nextState = waitForState(host, latestStates, (state) => state.game?.phase === 'resolving' || state.game?.trick.length > previousLength)
+    await emitAck(participant.socket, 'game:play', { cardId })
+    room = await nextState
+  }
+
+  if (room.game?.phase === 'resolving') throw new Error('The trick resolved before the browser player could play the final card.')
+  const finalPlayerId = room.game?.currentTurnId
+  const finalParticipant = participants.find(({ credentials }) => credentials.playerId === finalPlayerId)
+  if (!finalParticipant) throw new Error('Could not identify the final player in the opening trick.')
+  finalParticipant.socket.disconnect()
+
+  const storedCredentials = JSON.stringify(finalParticipant.credentials)
+  await evaluate(cdp, `localStorage.setItem(${JSON.stringify(`thulla:seat:${finalParticipant.credentials.code}`)}, ${JSON.stringify(storedCredentials)})`)
+  await cdp.send('Page.navigate', { url: `${CLIENT_URL}/?room=${finalParticipant.credentials.code}` })
   try {
     await waitForExpression(cdp, `Boolean(document.querySelector('.game-v2-shell'))`)
+    await waitForExpression(cdp, `Boolean(document.querySelector('.game-card--selectable:not(:disabled)'))`)
   } catch (error) {
-    const pageState = await evaluate(cdp, `({ url: location.href, title: document.title, text: document.body?.innerText.slice(0, 500) ?? '' })`)
+    const pageState = await evaluate(cdp, `({ url: location.href, title: document.title, text: document.body?.innerText.slice(0, 800) ?? '' })`)
     throw new Error(`${error.message} Page state: ${JSON.stringify(pageState)}`)
   }
-  if (SCENARIO === 'active') {
-    await evaluate(cdp, `document.querySelector('.game-card--selectable:not(:disabled)')?.click()`)
-    await waitForExpression(cdp, `Boolean(document.querySelector('.game-card.is-selected'))`)
-  } else {
-    await waitForExpression(cdp, `Boolean(document.querySelector('.game-v2-resolution') && document.querySelector('.game-v2-trick-card.is-last-played'))`)
+
+  await evaluate(cdp, `document.querySelector('.game-card--selectable:not(:disabled)')?.click()`)
+  await waitForExpression(cdp, `Boolean(document.querySelector('.game-card.is-selected, .game-card[aria-pressed="true"]'))`)
+  const resolvingStatePromise = waitForState(host, latestStates, (state) => state.game?.phase === 'resolving')
+  await evaluate(cdp, `document.querySelector('.game-v2-button--primary:not(:disabled)')?.click()`)
+  const resolvingState = await resolvingStatePromise
+  const resolutionObservedAt = Date.now()
+
+  assert(resolvingState.game?.currentTurnId === null, 'A current turn remained active during trick resolution.')
+  assert(resolvingState.game?.turnEndsAt === null, 'The turn timer continued during trick resolution.')
+  assert(Boolean(resolvingState.game?.resolvedTrick), 'The server omitted the completed trick during resolution.')
+  assert((resolvingState.game?.resolutionEndsAt ?? 0) - resolutionObservedAt >= 2_000, 'The completed trick was not retained long enough for players to read it.')
+
+  await waitForExpression(cdp, `Boolean(document.querySelector('.game-v2-resolution') && document.querySelector('.game-v2-trick-card.is-last-played'))`)
+  const resolutionResults = []
+  for (const viewport of VIEWPORTS) {
+    resolutionResults.push(await capture(cdp, `resolution-${viewport.name}`, viewport.width, viewport.height))
+  }
+  for (const result of resolutionResults) {
+    assert(result.visibleTrickCards === room.players.length, `${result.viewport.join('x')} did not show all completed trick cards.`)
+    assert(result.lastCardVisible, `${result.viewport.join('x')} did not identify the final card.`)
+    assert(!result.clockVisible, `${result.viewport.join('x')} showed a running turn clock during resolution.`)
+    assert(!result.pageOverflowX, `${result.viewport.join('x')} gameplay has horizontal page overflow.`)
+    assert(result.focusableDisplayCards === 0, `${result.viewport.join('x')} exposes display-only table cards as buttons.`)
+    assert(result.unnamedControls.length === 0, `${result.viewport.join('x')} has unnamed controls.`)
+    assert(result.duplicateIds.length === 0, `${result.viewport.join('x')} has duplicate element IDs.`)
+    if (result.viewport[0] <= 844) {
+      assert(result.touchViolations.length === 0, `${result.viewport.join('x')} has touch targets under 44px: ${JSON.stringify(result.touchViolations)}`)
+    }
   }
 
-  const results = []
-  results.push(await capture(cdp, `${SCENARIO}-desktop`, 1440, 900))
-  results.push(await capture(cdp, `${SCENARIO}-mobile`, 375, 812))
-  results.push(await capture(cdp, `${SCENARIO}-landscape`, 844, 390))
-  const consoleErrors = await evaluate(cdp, `document.querySelector('.entry-banner')?.textContent ?? null`)
-  await cdp.send('Browser.close').catch(() => undefined)
-  cdp.close()
+  const nextTurnState = await waitForState(
+    host,
+    latestStates,
+    (state) => state.game?.phase === 'turn' && !state.game.resolvedTrick,
+    6_000,
+  )
+  const clearedAt = Date.now()
+  await setViewport(cdp, 1440, 900)
+  await waitForExpression(cdp, `!document.querySelector('.game-v2-resolution') && Boolean(document.querySelector('.game-v2-empty-trick'))`)
+  const cleared = await capture(cdp, 'next-trick-desktop', 1440, 900)
+  assert(cleared.visibleTrickCards === 0, 'Completed cards remained after the three-second resolution phase.')
+  assert(cleared.emptyTrickVisible, 'The empty lead state did not appear after completed cards cleared.')
+  assert(cleared.clockVisible, 'The next turn timer did not begin after completed cards cleared.')
+  assert(Boolean(nextTurnState.game?.currentTurnId), 'The server did not assign the next turn after resolution.')
+  assert((nextTurnState.game?.turnEndsAt ?? 0) > clearedAt, 'The next turn deadline was not started after resolution.')
+  const deadlineDrift = Math.abs((resolvingState.game?.resolutionEndsAt ?? clearedAt) - clearedAt)
+  assert(deadlineDrift <= 1_200, `Resolution cleared ${deadlineDrift}ms away from its server deadline.`)
 
-  const report = { scenario: SCENARIO, room: credentials.code, playerId: credentials.playerId, consoleErrors, results }
-  const reportPath = join(OUTPUT_DIR, `${SCENARIO}-visual-qa-report.json`)
+  await cdp.send('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+  })
+  const reducedMotion = await evaluate(cdp, `(() => {
+    const animated = [...document.querySelectorAll('.game-v2-clock, .game-v2-event, .game-v2-trick-card')]
+      .filter((element) => getComputedStyle(element).animationName !== 'none')
+      .map((element) => ({ className: element.className, animation: getComputedStyle(element).animationName }))
+    return { enabled: matchMedia('(prefers-reduced-motion: reduce)').matches, animated }
+  })()`)
+  assert(reducedMotion.enabled, 'Reduced-motion emulation did not activate.')
+  assert(reducedMotion.animated.length === 0, `Reduced motion left animations active: ${JSON.stringify(reducedMotion.animated)}`)
+
+  const consoleProblems = browserProblems(cdp)
+  assert(consoleProblems.length === 0, `Browser console errors were recorded: ${consoleProblems.join(' | ')}`)
+
+  const report = {
+    room: finalParticipant.credentials.code,
+    playerId: finalParticipant.credentials.playerId,
+    landing: { ...landing, cta: landingCta },
+    fixtures: fixtureResults,
+    resolution: {
+      observedAt: resolutionObservedAt,
+      serverDeadline: resolvingState.game?.resolutionEndsAt,
+      clearedAt,
+      deadlineDrift,
+      serverPaused: resolvingState.game?.currentTurnId === null && resolvingState.game?.turnEndsAt === null,
+      results: resolutionResults,
+    },
+    nextTrick: cleared,
+    reducedMotion,
+    consoleProblems,
+    failures,
+  }
+  const reportPath = join(OUTPUT_DIR, 'visual-qa-report.json')
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`)
   console.log(JSON.stringify(report, null, 2))
+  if (failures.length) process.exitCode = 1
 } finally {
   for (const socket of sockets) socket.disconnect()
+  if (cdp) {
+    await cdp.send('Browser.close').catch(() => undefined)
+    cdp.close()
+  }
   if (chrome && !chrome.killed) {
     chrome.kill()
     await Promise.race([
       new Promise((resolveExit) => chrome.once('exit', resolveExit)),
-      new Promise((resolveWait) => setTimeout(resolveWait, 2_000)),
+      delay(2_000),
     ])
   }
   const safeTempRoot = `${resolve(tmpdir()).toLowerCase()}${sep}`
@@ -263,7 +467,7 @@ try {
         break
       } catch (error) {
         if (attempt === 7) console.warn(`Could not remove temporary Chrome profile: ${error.message}`)
-        else await new Promise((resolveWait) => setTimeout(resolveWait, 250))
+        else await delay(250)
       }
     }
   }

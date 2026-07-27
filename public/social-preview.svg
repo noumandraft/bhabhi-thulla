@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Bhabhi Thulla — Bach ke nikal</title>
+  <desc id="desc">Playing cards on a deep green Pakistani card table with a gold invitation to play.</desc>
+  <defs>
+    <pattern id="weave" width="34" height="34" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <path d="M0 0v34" stroke="#fffaf0" stroke-opacity=".045" stroke-width="2"/>
+    </pattern>
+    <filter id="shadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="18" stdDeviation="14" flood-color="#001d18" flood-opacity=".36"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="630" fill="#073f35"/>
+  <rect width="1200" height="630" fill="url(#weave)"/>
+  <circle cx="1078" cy="84" r="150" fill="#0d6757" opacity=".55"/>
+  <circle cx="1085" cy="82" r="74" fill="#f5cf68" opacity=".96"/>
+  <text x="88" y="126" fill="#fffaf0" font-family="Arial, sans-serif" font-size="34" font-weight="800" letter-spacing="1">BHABHI</text>
+  <text x="88" y="168" fill="#f5cf68" font-family="Arial, sans-serif" font-size="45" font-weight="900" letter-spacing="1">THULLA</text>
+  <text x="88" y="302" fill="#fffaf0" font-family="Arial, sans-serif" font-size="74" font-weight="900">Bach ke nikal.</text>
+  <text x="88" y="382" fill="#f5cf68" font-family="Arial, sans-serif" font-size="74" font-weight="900">Bhabhi na banna.</text>
+  <text x="92" y="452" fill="#fffaf0" fill-opacity=".74" font-family="Arial, sans-serif" font-size="27">Pakistan’s classic card game, now online with friends.</text>
+  <g filter="url(#shadow)" transform="translate(892 250)">
+    <g transform="rotate(-19 105 150)">
+      <rect x="0" width="210" height="300" rx="20" fill="#fffaf0" stroke="#132c26" stroke-width="8"/>
+      <text x="24" y="60" fill="#132c26" font-family="Georgia, serif" font-size="48" font-weight="700">A</text>
+      <path d="M45 88c-25 28-34 45-34 61 0 22 16 38 37 38 11 0 21-5 28-13-2 18-8 27-17 36h62c-9-9-15-18-17-36 7 8 17 13 28 13 21 0 37-16 37-38 0-16-9-33-34-61l-45-50z" fill="#132c26" transform="translate(14 45) scale(.84)"/>
+    </g>
+    <g transform="translate(105 -15) rotate(8 105 150)">
+      <rect width="210" height="300" rx="20" fill="#fffaf0" stroke="#132c26" stroke-width="8"/>
+      <text x="24" y="60" fill="#c92f48" font-family="Georgia, serif" font-size="48" font-weight="700">K</text>
+      <path d="M105 220C74 185 35 156 35 112c0-33 24-55 52-55 19 0 34 11 43 27 8-18 23-29 43-29 29 0 52 22 52 55 0 44-39 75-70 110l-25 28z" fill="#c92f48" transform="translate(-1 14)"/>
+    </g>
+    <g transform="translate(218 20) rotate(24 105 150)">
+      <rect width="210" height="300" rx="20" fill="#fffaf0" stroke="#132c26" stroke-width="8"/>
+      <text x="24" y="60" fill="#c92f48" font-family="Georgia, serif" font-size="48" font-weight="700">7</text>
+      <path d="M105 220C74 185 35 156 35 112c0-33 24-55 52-55 19 0 34 11 43 27 8-18 23-29 43-29 29 0 52 22 52 55 0 44-39 75-70 110l-25 28z" fill="#c92f48" transform="translate(-1 14)"/>
+    </g>
+  </g>
+  <rect x="88" y="510" width="354" height="62" rx="31" fill="#f5cf68"/>
+  <text x="265" y="550" text-anchor="middle" fill="#17362e" font-family="Arial, sans-serif" font-size="20" font-weight="800">PRIVATE ROOMS · NO SIGNUP</text>
+</svg>

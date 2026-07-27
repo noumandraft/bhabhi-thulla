@@ -1,118 +1,178 @@
 # Bhabhi Thulla
 
-A mobile-first, real-time multiplayer version of the Pakistani/Punjabi card game Bhabhi Thulla (also called Getaway).
+A mobile-first, real-time multiplayer version of the Pakistani/Punjabi card game Bhabhi Thulla (also called Getaway), built for private games with friends.
 
-## What is included
+- Frontend: React, TypeScript and Vite on static hosting
+- Multiplayer server: Node.js, Express and Socket.IO
+- Optional shared room state: Redis-compatible storage
+- Rules and integration tests: Vitest
+- Live site: <https://thulla.joypad.fun>
 
-- Private rooms with five-character invite codes
-- Three to eight players using one 52-card deck
-- Server-authoritative moves, shuffle, turns, and outcomes
-- Strict follow-suit and immediate thulla resolution
-- Pakistani opening rule: the Ace of Spades starts and the first trick is always discarded
-- The power rule: a clean-trick winner cannot escape while owing the next lead
-- Thirty-five-second turns with a legal automatic move on timeout
-- Refresh/reconnect support using a private seat token in the player's browser
-- Host handoff in the lobby and between rounds
-- Responsive phone, landscape, tablet, and desktop layouts
-- No account, database, tracking, public chat, or paid currency
+## Player experience
 
-Rooms and active games are held in server memory. This keeps the first release simple, but a Render restart will end active matches.
+- Private five-character room codes with no signup
+- Three to eight human or bot players using one 52-card deck
+- Practice mode that immediately starts a game with two bots
+- Server-authoritative shuffle, legal moves, turns, timers and results
+- Anticlockwise play to the active player on the right
+- Three-second completed-trick phase: all cards and the THULLA/result stay visible, no player can act, and the next turn timer starts only after the cards clear
+- Sixty-second reconnect grace period with the active turn paused
+- Host option to replace an unavailable player with a bot
+- Ready states, host removal controls, bots and 20/35/60-second turn settings
+- Session scoreboard, rematch readiness and score reset
+- Preset table reactions without public or free-text chat
+- Optional turn sound, vibration, hidden-tab title alert and reaction mute
+- English, Roman Urdu and Urdu interface options
+- Interactive tutorial, illustrated rules and contextual “What happened?” explanations
+- Responsive phone portrait, phone landscape, tablet and desktop table layouts
+- Installable PWA with a cached static shell, explicit offline messaging and player-controlled updates
 
-## Technology
-
-- React, TypeScript, and Vite for the static frontend
-- Node.js, Express, and Socket.IO for the multiplayer server
-- Vitest for the rules engine tests
+The offline shell never becomes an authoritative copy of a match. Card hands, room state, Socket.IO traffic, API responses and reconnect tokens are not stored by the service worker.
 
 ## Run locally
 
-Requirements: Node.js 20 or newer.
+Use Node.js 20 or newer.
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. The Socket.IO server runs at `http://localhost:3001`.
+Open <http://localhost:5173>. The Socket.IO server runs at <http://localhost:3001>.
 
 Useful commands:
 
 ```bash
 npm test
 npm run build
+npm run qa:platform
+npm run qa:visual
 npm start
 ```
 
-With `npm run dev` already running, `npm run qa:visual` creates an eight-player local match and verifies the real game table at desktop, mobile portrait, and mobile landscape sizes. Screenshots and the overflow/touch-target report are saved in `design/qa/`.
+`npm run qa:platform` validates the manifest, install icons, social preview, metadata, service-worker update policy and cache exclusions.
+
+With `npm run dev` already running, `npm run qa:visual` creates a real eight-player match and verifies:
+
+- Mobile landing CTA placement
+- Lobby, resolving, reconnect and finished-scoreboard fixtures at 390×844 and 844×390
+- A real three-second server resolution phase
+- Completed-card visibility and final-card emphasis
+- Paused timer during resolution and a fresh timer afterward
+- Desktop 1440×900, mobile 375×812 and landscape 844×390 gameplay
+- Horizontal overflow, 44px touch targets, accessible names, duplicate IDs, display-card semantics, reduced motion and console errors
+
+Screenshots and `visual-qa-report.json` are written to `design/qa/`.
 
 `npm run build` creates:
 
-- `dist/` — static frontend files for Hostinger
-- `dist-server/` — compiled multiplayer server for Render
+- `dist/` — static Hostinger frontend, including the stamped service worker
+- `dist-server/` — compiled Render server
+
+## Environment variables
+
+| Variable | Used by | Required | Example / purpose |
+| --- | --- | --- | --- |
+| `VITE_SERVER_URL` | Frontend build | Production | `https://bhabhi-thulla-server.onrender.com` |
+| `VITE_APP_COMMIT` | Frontend build | Recommended | Git commit shown in build diagnostics and used to version the service worker |
+| `CLIENT_ORIGIN` | Server | Production | `https://thulla.joypad.fun`; comma-separate additional trusted origins |
+| `PORT` | Server | Provided by Render | Public HTTP and WebSocket port |
+| `REDIS_URL` | Server | Optional | Redis-compatible connection URL for shared room state |
+| `REDIS_KEY_PREFIX` | Server | Optional | Namespace for room keys; defaults to `bhabhi-thulla:room:` |
+| `REDIS_DURABLE` | Server | Optional | Set to `true` only when the selected Redis provider really persists across restart |
+| `COMMIT_SHA` | Server | Optional outside Render | Source revision returned by health diagnostics |
+| `RENDER_GIT_COMMIT` | Server/Render | Automatic on Render | Deployed source revision returned by health diagnostics |
+
+Keep secrets in Render or local ignored `.env` files. Never expose `REDIS_URL` through a `VITE_` variable—every `VITE_` value is included in the public browser bundle.
+
+## Persistence modes
+
+Without `REDIS_URL`, the server deliberately uses in-memory room storage. That is convenient locally, but a restart deletes every active room and the process cannot safely scale to multiple instances.
+
+With `REDIS_URL`, room mutations are stored with an abandonment TTL. Socket IDs are never persisted. Restored rooms remain suspended until a player reconnects, then absolute trick/reconnect deadlines are reconciled rather than silently granting a fresh timer.
+
+Storage durability depends on the provider. Render's free Key Value service is in-memory and loses data when it restarts, and a free web service has an ephemeral filesystem. To make matches survive infrastructure restarts, use a persistent paid Key Value service or another durable Redis-compatible provider. Do not use the Render filesystem for match persistence.
 
 ## Deploy the server to Render
 
-The included `render.yaml` can create the free web service from a Git repository.
+The included `render.yaml` defines the web service.
 
-1. Push this project to a Git provider supported by Render.
-2. In Render, create a new Blueprint and select the repository. Alternatively, create a Node web service manually.
-3. Use `npm ci && npm run build:server` as the build command.
-4. Use `npm start` as the start command.
-5. Set `CLIENT_ORIGIN` to `https://thulla.joypad.fun`.
-6. Confirm that `https://YOUR-SERVICE.onrender.com/health` returns an object with `"ok": true`.
+1. Provision persistent Redis-compatible storage if resumable matches are required. Copy its private connection URL into `REDIS_URL`.
+2. Push the repository to GitHub.
+3. In Render, create a Blueprint from the repository, or create a Node web service manually.
+4. Build with `npm ci && npm run build:server`.
+5. Start with `npm start`.
+6. Set `CLIENT_ORIGIN=https://thulla.joypad.fun`. Add local/staging origins as a comma-separated list only when needed.
+7. Render supplies `PORT` and `RENDER_GIT_COMMIT`; use `COMMIT_SHA` on another host if it does not provide a revision automatically.
+8. Add `REDIS_URL` when shared persistence is available. Optionally isolate deployments with `REDIS_KEY_PREFIX`.
+9. Set `REDIS_DURABLE=true` only for a provider that guarantees persistence across restart. Leave it `false` for memory-only and Render Free Key Value.
+10. Verify `https://YOUR-SERVICE.onrender.com/health` for process liveness and version information.
+11. Verify `https://YOUR-SERVICE.onrender.com/ready` reports the expected persistence mode and readiness before deploying the frontend.
 
-Render must expose the service on the `PORT` environment variable; the server already does this. WebSocket traffic uses the same public port as HTTP.
+Do not use `CLIENT_ORIGIN=*` in production. WebSocket traffic uses the same public port as HTTP.
 
 ## Deploy the frontend to Hostinger
 
-Create a local `.env.production` file:
+Deploy the backend first so the new frontend never speaks to an older Socket.IO protocol.
+
+Create `.env.production`:
 
 ```env
 VITE_SERVER_URL=https://YOUR-SERVICE.onrender.com
+VITE_APP_COMMIT=YOUR_GIT_COMMIT
 ```
 
-Then build the frontend:
+Then build:
 
 ```bash
 npm ci
 npm run build:client
+npm run qa:platform
 ```
 
-Upload the **contents** of `dist/` to the document root assigned to `thulla.joypad.fun` in Hostinger. Do not upload `node_modules`, `src`, or the server files to the static host.
+Upload the **contents** of `dist/` to the document root assigned to `thulla.joypad.fun`. Include `sw.js`, `manifest.webmanifest`, `offline.html`, `platform.css`, `icons/` and `assets/`. Do not upload `node_modules`, `src`, Redis credentials or server files.
 
-After deployment, verify:
+Hostinger must serve the site over HTTPS and serve `/sw.js` as JavaScript. The service worker uses network-first navigation and caches only the static shell/same-origin assets. A waiting release shows **Update & reconnect** and does not force a reload during a game.
 
-1. The landing page reports **Server ready**.
-2. One browser can create a room.
-3. An incognito window or another device can join through the shared URL.
-4. Three connected players enable **Deal the cards**.
-5. Refreshing a player’s browser restores their seat.
+After deployment, verify in order:
 
-## Environment variables
-
-| Variable | Used by | Example |
-| --- | --- | --- |
-| `VITE_SERVER_URL` | Frontend build | `https://bhabhi-thulla-server.onrender.com` |
-| `CLIENT_ORIGIN` | Multiplayer server | `https://thulla.joypad.fun` |
-| `PORT` | Multiplayer server | Provided automatically by Render |
-
-Multiple allowed frontend origins can be comma-separated in `CLIENT_ORIGIN`. Avoid `*` after testing.
+1. `/health` and `/ready` on the backend.
+2. The landing page reports **Server ready**.
+3. The browser application panel recognizes the manifest and service worker.
+4. One browser creates a room and another device joins the shared link.
+5. Three ready players can deal cards.
+6. The opening trick remains visible for about three seconds with no turn clock, clears, and then starts a fresh clock.
+7. Refresh restores the same seat.
+8. Temporarily going offline shows the reconnect notice without exposing stale match state.
+9. Phone portrait and landscape have no page-level horizontal overflow.
 
 ## Rules implemented
 
-Cards rank from high to low: A, K, Q, J, 10 through 2. Play moves anticlockwise, so the next turn belongs to the active player on the right.
+Cards rank from high to low: A, K, Q, J, 10 through 2. Turns move anticlockwise to the next active player sitting on the right.
 
 1. The holder of the Ace of Spades opens with that card.
-2. Every active player contributes to the opening trick. It is discarded even if someone cannot follow Spades.
+2. Every active player contributes to the opening trick. It is discarded even when someone cannot follow Spades.
 3. On later tricks, a player must follow the led suit whenever possible.
-4. A player without the led suit can play any card. This is a thulla and immediately stops the trick.
-5. The highest card of the led suit picks up every card in a thulla trick and leads next.
-6. A clean trick is discarded; its highest led-suit card holds the power and leads next.
-7. Before leading a new trick, the player with power may take the entire hand of the next active player on the right. The right-hand player gets away safely; the player who took the cards still leads.
-8. This right-hand option can be used once before that lead, and is unavailable during the opening trick.
-9. A player who empties their hand gets away unless their last card won a clean trick. In that case, they draw a random card from the earlier waste and must lead it.
+4. A player without the led suit may play any card. This is a THULLA and immediately completes the trick.
+5. The highest card of the led suit picks up every card in a THULLA trick and leads next.
+6. A clean trick is discarded; its highest led-suit card keeps the power and leads next.
+7. Before leading a new trick, the player with power may take the whole hand of the next active player on the right. That player gets away safely; the player who took the cards still leads.
+8. The right-hand option can be used once before that lead and is unavailable during the opening trick.
+9. A player who empties their hand gets away unless their last card won a clean trick. In that case, they draw from the earlier waste and keep the lead.
 10. The last active player is the Bhabhi and loses the round.
 
-## Free hosting limitation
+At the end of every trick, resolution is server-authoritative: completed cards remain visible for three seconds, `currentTurnId` and the turn deadline are empty, actions are rejected, then the cards clear and a new turn deadline starts. Reconnecting during that pause reveals only the remaining display time.
 
-Render’s free service can sleep when idle and may restart. Active WebSocket traffic keeps a live match awake, but an instance restart still clears in-memory rooms. Durable accounts, rankings, and resumable games should be added only with persistent shared storage.
+## Privacy-friendly analytics
+
+No analytics provider is currently loaded. If anonymous product analytics are introduced, implementation must follow the allowlist in [docs/analytics-events.md](docs/analytics-events.md).
+
+The specification permits coarse funnel events such as landing viewed, room entered, match completed and reconnect succeeded. It forbids player names, room codes, reconnect tokens, card hands, socket IDs, IP addresses, session replay, advertising identifiers and cross-site tracking.
+
+## Production limitations
+
+- Free Render services may sleep when idle; the landing page can briefly show **Waking up server…**.
+- Memory-only rooms disappear on server restart.
+- Render Free Key Value is not durable across its own restart.
+- The app has no accounts, global rankings, public matchmaking, public chat or paid currency.
+- Horizontal scaling requires shared room storage plus a Socket.IO scaling/sticky-session strategy.

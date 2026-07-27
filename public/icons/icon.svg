@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Bhabhi Thulla playing card logo</title>
+  <rect width="512" height="512" fill="#073f35"/>
+  <path d="M118 130c-8-32 12-62 44-69l169-36c32-7 63 14 69 46l57 267c7 32-14 63-46 69l-169 36c-32 7-62-14-69-46z" fill="#efe9da" stroke="#132c26" stroke-width="18"/>
+  <rect x="96" y="93" width="248" height="342" rx="36" fill="#fffaf0" stroke="#132c26" stroke-width="18" transform="rotate(-4 220 264)"/>
+  <path d="M219 326c-24-26-79-69-83-117-4-40 24-66 57-65 24 1 42 16 52 35 8-21 24-39 48-42 33-4 65 18 67 58 3 49-45 99-64 129l-35 52z" fill="#c92f48" transform="rotate(-4 248 257)"/>
+  <circle cx="405" cy="111" r="30" fill="#f5cf68"/>
+</svg>

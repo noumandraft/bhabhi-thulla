@@ -1,45 +1,70 @@
-import { randomBytes, randomInt, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import {
+  PROTOCOL_VERSION,
   RANKS,
+  REACTIONS,
+  RECONNECT_GRACE_MS,
   SUITS,
+  TRICK_RESOLUTION_MS,
+  TURN_SECONDS,
   rankValue,
   sortCards,
   type ActivityItem,
   type Card,
+  type GamePhase,
+  type Reaction,
+  type ReactionEvent,
+  type ResolvedTrickView,
   type RoomCredentials,
+  type RoomLeaveResult,
+  type RoomSettings,
   type RoomView,
+  type SessionScore,
   type Suit,
+  type TurnSeconds,
 } from '../shared/game.js'
 
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-const TURN_LENGTH_MS = 35_000
+const ROOM_TTL_MS = 6 * 60 * 60 * 1000
 
-interface Player {
+export interface Player {
   id: string
-  token: string
+  tokenHash: string
   socketId: string | null
   name: string
   hand: Card[]
   connected: boolean
   escaped: boolean
   isHost: boolean
+  ready: boolean
+  isBot: boolean
+  rematchReady: boolean
+  reconnectGraceUsed: boolean
+  /** Internal rollout bridge. Never include this capability flag in RoomView. */
+  usesReadyProtocol: boolean
 }
 
-interface TrickCard {
+export interface TrickCard {
   playerId: string
   card: Card
 }
 
-interface ResolvedTrick {
+export interface ResolvedTrick {
   cards: TrickCard[]
-  kind: 'opening' | 'clean' | 'thulla'
+  kind: ResolvedTrickView['kind']
   winnerId: string
   lastPlayerId: string
 }
 
-interface GameState {
+export interface GameState {
+  phase: GamePhase
   trick: TrickCard[]
   resolvedTrick: ResolvedTrick | null
+  resolutionEndsAt: number | null
+  pendingTurnId: string | null
+  pendingLoserId: string | null
+  pendingWasteLeadPlayerId: string | null
+  pendingWasteCards: Card[]
   waste: Card[]
   leadSuit: Suit | null
   leaderId: string | null
@@ -48,6 +73,12 @@ interface GameState {
   takeUsedForLead: boolean
   loserId: string | null
   turnEndsAt: number | null
+  turnRemainingMs: number | null
+  reconnectPlayerId: string | null
+  reconnectEndsAt: number | null
+  roundEscapeOrder: string[]
+  roundPlayerIds: string[]
+  scoreRecorded: boolean
   activity: ActivityItem[]
 }
 
@@ -56,7 +87,38 @@ export interface Room {
   status: 'lobby' | 'playing' | 'finished'
   players: Player[]
   game: GameState | null
+  settings: RoomSettings
+  session: {
+    roundNumber: number
+    scores: SessionScore[]
+  }
   updatedAt: number
+  /** Restored rooms stay inert until a player reconnects. Never persist this flag. */
+  suspended?: boolean
+}
+
+export interface PersistenceStatus {
+  mode: string
+  durable: boolean
+  ready: boolean
+  error?: string
+}
+
+export interface RoomPersistence {
+  initialize(): Promise<void>
+  loadAll(): Promise<Room[]>
+  save(room: Room): Promise<void>
+  delete(code: string): Promise<void>
+  close?(): Promise<void>
+  status(): PersistenceStatus
+}
+
+class MemoryPersistence implements RoomPersistence {
+  async initialize(): Promise<void> {}
+  async loadAll(): Promise<Room[]> { return [] }
+  async save(_room: Room): Promise<void> {}
+  async delete(_code: string): Promise<void> {}
+  status(): PersistenceStatus { return { mode: 'memory', durable: false, ready: true } }
 }
 
 function makeDeck(): Card[] {
@@ -79,19 +141,36 @@ function cleanName(value: unknown): string {
   return name
 }
 
+function cleanCode(value: unknown): string {
+  const code = typeof value === 'string' ? value.trim().toUpperCase() : ''
+  if (!/^[A-Z2-9]{5}$/.test(code)) throw new Error('Enter a valid 5-character room code.')
+  return code
+}
+
+function hashToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex')
+}
+
+function tokenMatches(token: string, expectedHash: string): boolean {
+  const actual = Buffer.from(hashToken(token), 'hex')
+  const expected = Buffer.from(expectedHash, 'hex')
+  return actual.length === expected.length && timingSafeEqual(actual, expected)
+}
+
 function activePlayers(room: Room): Player[] {
   return room.players.filter((player) => !player.escaped)
 }
 
 function ensureConnectedHost(room: Room): void {
-  if (room.players.some((player) => player.isHost && player.connected)) return
-  for (const player of room.players) player.isHost = false
-  const nextHost = room.players.find((player) => player.connected)
-  if (nextHost) nextHost.isHost = true
+  const connectedHumans = room.players.filter((player) => player.connected && !player.isBot)
+  const nextHost = connectedHumans.find((player) => player.isHost) ?? connectedHumans[0]
+  for (const player of room.players) player.isHost = player.id === nextHost?.id
 }
 
+/** Anticlockwise: the next active seat is the array item immediately to the right. */
 function nextActive(room: Room, playerId: string): Player | null {
   const startIndex = room.players.findIndex((player) => player.id === playerId)
+  if (startIndex < 0) return null
   for (let offset = 1; offset <= room.players.length; offset += 1) {
     const candidate = room.players[(startIndex - offset + room.players.length) % room.players.length]
     if (!candidate.escaped) return candidate
@@ -101,6 +180,7 @@ function nextActive(room: Room, playerId: string): Player | null {
 
 function highestLedCard(trick: TrickCard[], leadSuit: Suit): TrickCard {
   const suited = trick.filter((entry) => entry.card.suit === leadSuit)
+  if (!suited.length) throw new Error('The trick has no card in the led suit.')
   return suited.reduce((highest, entry) =>
     rankValue(entry.card.rank) > rankValue(highest.card.rank) ? entry : highest,
   )
@@ -111,18 +191,114 @@ function addActivity(
   text: string,
   tone: ActivityItem['tone'] = 'neutral',
   kind: NonNullable<ActivityItem['kind']> = 'general',
+  data?: ActivityItem['data'],
 ): void {
-  game.activity.unshift({ id: randomUUID(), text, tone, kind })
-  game.activity = game.activity.slice(0, 12)
+  game.activity.unshift({ id: randomUUID(), text, tone, kind, data })
+  game.activity = game.activity.slice(0, 16)
+}
+
+function defaultSettings(): RoomSettings {
+  return {
+    turnSeconds: 35,
+    reconnectGraceSeconds: 60,
+    allowBots: true,
+    reactionsEnabled: true,
+    tutorialHints: true,
+  }
+}
+
+function newScore(player: Player): SessionScore {
+  return {
+    playerId: player.id,
+    playerName: player.name,
+    roundsPlayed: 0,
+    escapes: 0,
+    firstEscapes: 0,
+    bhabhiCount: 0,
+    currentBhabhiStreak: 0,
+    bestBhabhiStreak: 0,
+  }
 }
 
 export class GameManager {
   readonly rooms = new Map<string, Room>()
   private readonly timers = new Map<string, NodeJS.Timeout>()
   private publisher: (room: Room) => void = () => undefined
+  private readonly persistence: RoomPersistence
+
+  constructor(persistence: RoomPersistence = new MemoryPersistence()) {
+    this.persistence = persistence
+  }
+
+  async initialize(): Promise<void> {
+    await this.persistence.initialize()
+    const now = Date.now()
+    for (const restored of await this.persistence.loadAll()) {
+      if (!restored?.code || restored.updatedAt < now - ROOM_TTL_MS) continue
+      restored.settings = { ...defaultSettings(), ...restored.settings, reconnectGraceSeconds: 60 }
+      restored.session ??= { roundNumber: 0, scores: [] }
+      restored.players = restored.players.map((player) => ({
+        ...player,
+        socketId: null,
+        connected: player.isBot,
+        usesReadyProtocol: player.usesReadyProtocol ?? false,
+        ready: player.isBot || !(player.usesReadyProtocol ?? false) ? true : Boolean(player.ready),
+        rematchReady: player.isBot || !(player.usesReadyProtocol ?? false) ? true : Boolean(player.rematchReady),
+        reconnectGraceUsed: Boolean(player.reconnectGraceUsed),
+      }))
+      for (const player of restored.players) this.ensureScore(restored, player)
+      restored.suspended = restored.status === 'playing'
+      if (restored.game) this.normalizeRestoredGame(restored.game)
+      this.rooms.set(restored.code, restored)
+    }
+  }
+
+  persistenceStatus(): PersistenceStatus {
+    return this.persistence.status()
+  }
+
+  socketOwnsSeat(roomCode: unknown, playerId: unknown, socketId: string): boolean {
+    if (typeof roomCode !== 'string' || typeof playerId !== 'string') return false
+    const room = this.rooms.get(roomCode.trim().toUpperCase())
+    return Boolean(room?.players.some((player) => player.id === playerId && player.socketId === socketId && player.connected))
+  }
+
+  socketHasSeat(socketId: string): boolean {
+    return Boolean(socketId && [...this.rooms.values()].some((room) =>
+      room.players.some((player) => player.socketId === socketId),
+    ))
+  }
+
+  private ensureSocketHasNoSeat(socketId: string): void {
+    if (this.socketHasSeat(socketId)) throw new Error('This connection is already seated in a room. Leave it before joining another.')
+  }
+
+  async close(): Promise<void> {
+    for (const code of this.timers.keys()) this.clearTimer(code)
+    await this.persistence.close?.()
+  }
 
   setPublisher(publisher: (room: Room) => void): void {
     this.publisher = publisher
+  }
+
+  private normalizeRestoredGame(game: GameState): void {
+    game.phase ??= game.resolvedTrick ? 'resolving' : 'turn'
+    game.resolutionEndsAt ??= null
+    game.pendingTurnId ??= null
+    game.pendingLoserId ??= null
+    game.pendingWasteLeadPlayerId ??= null
+    game.pendingWasteCards ??= []
+    game.turnRemainingMs ??= null
+    game.reconnectPlayerId ??= null
+    game.reconnectEndsAt ??= null
+    game.roundEscapeOrder ??= []
+    game.roundPlayerIds ??= []
+    game.scoreRecorded ??= false
+    game.turnEndsAt = null
+    if (game.phase === 'waiting_for_reconnect') {
+      game.turnRemainingMs ??= 0
+    }
   }
 
   private makeRoomCode(): string {
@@ -134,86 +310,329 @@ export class GameManager {
     throw new Error('Could not create a room. Please try again.')
   }
 
-  private makePlayer(name: unknown, socketId: string, isHost: boolean): Player {
+  private makePlayer(
+    name: unknown,
+    socketId: string | null,
+    isHost: boolean,
+    isBot = false,
+    usesReadyProtocol = true,
+  ): { player: Player; token: string } {
+    const token = randomBytes(32).toString('base64url')
     return {
-      id: randomUUID(),
-      token: randomBytes(24).toString('base64url'),
-      socketId,
-      name: cleanName(name),
-      hand: [],
-      connected: true,
-      escaped: false,
-      isHost,
+      token,
+      player: {
+        id: randomUUID(),
+        tokenHash: hashToken(token),
+        socketId,
+        name: cleanName(name),
+        hand: [],
+        connected: isBot || Boolean(socketId),
+        escaped: false,
+        isHost,
+        ready: isBot || !usesReadyProtocol,
+        isBot,
+        rematchReady: isBot || !usesReadyProtocol,
+        reconnectGraceUsed: false,
+        usesReadyProtocol,
+      },
     }
   }
 
-  createRoom(name: unknown, socketId: string): { room: Room; credentials: RoomCredentials } {
-    const player = this.makePlayer(name, socketId, true)
+  createRoom(name: unknown, socketId: string, usesReadyProtocol = true): { room: Room; credentials: RoomCredentials } {
+    this.ensureSocketHasNoSeat(socketId)
+    const { player, token } = this.makePlayer(name, socketId, true, false, usesReadyProtocol)
     const room: Room = {
       code: this.makeRoomCode(),
       status: 'lobby',
       players: [player],
       game: null,
+      settings: defaultSettings(),
+      session: { roundNumber: 0, scores: [newScore(player)] },
       updatedAt: Date.now(),
     }
     this.rooms.set(room.code, room)
-    return { room, credentials: { code: room.code, playerId: player.id, token: player.token } }
+    this.changed(room)
+    return { room, credentials: { code: room.code, playerId: player.id, token } }
   }
 
-  joinRoom(codeValue: unknown, name: unknown, socketId: string): { room: Room; credentials: RoomCredentials } {
-    const code = String(codeValue ?? '').trim().toUpperCase()
+  joinRoom(codeValue: unknown, name: unknown, socketId: string, usesReadyProtocol = true): { room: Room; credentials: RoomCredentials } {
+    this.ensureSocketHasNoSeat(socketId)
+    const code = cleanCode(codeValue)
     const room = this.rooms.get(code)
     if (!room) throw new Error('Room not found. Check the code and try again.')
     if (room.status !== 'lobby') throw new Error('This match has already started.')
     if (room.players.length >= 8) throw new Error('This room is full.')
-    const player = this.makePlayer(name, socketId, false)
+    const { player, token } = this.makePlayer(name, socketId, false, false, usesReadyProtocol)
     room.players.push(player)
+    room.session.scores.push(newScore(player))
+    ensureConnectedHost(room)
     this.changed(room)
-    return { room, credentials: { code, playerId: player.id, token: player.token } }
+    return { room, credentials: { code, playerId: player.id, token } }
   }
 
-  reconnectRoom(codeValue: unknown, tokenValue: unknown, socketId: string): { room: Room; credentials: RoomCredentials } {
-    const code = String(codeValue ?? '').trim().toUpperCase()
-    const token = String(tokenValue ?? '')
+  reconnectRoom(
+    codeValue: unknown,
+    tokenValue: unknown,
+    socketId: string,
+    usesReadyProtocol?: boolean,
+  ): { room: Room; credentials: RoomCredentials } {
+    this.ensureSocketHasNoSeat(socketId)
+    const code = cleanCode(codeValue)
+    const token = typeof tokenValue === 'string' ? tokenValue : ''
+    if (token.length < 32 || token.length > 128) throw new Error('That saved seat is no longer available.')
     const room = this.rooms.get(code)
-    const player = room?.players.find((candidate) => candidate.token === token)
+    const player = room?.players.find((candidate) => !candidate.isBot && tokenMatches(token, candidate.tokenHash))
     if (!room || !player) throw new Error('That saved seat is no longer available.')
     player.socketId = socketId
     player.connected = true
+    if (usesReadyProtocol === true) player.usesReadyProtocol = true
+    room.suspended = false
+    ensureConnectedHost(room)
+
+    const game = room.game
+    if (room.status === 'playing' && game) {
+      if (game.phase === 'waiting_for_reconnect' && game.reconnectPlayerId === player.id) {
+        if (game.reconnectEndsAt !== null && game.reconnectEndsAt <= Date.now()) {
+          this.expireReconnectWait(room, player.id)
+        } else {
+          game.phase = 'turn'
+          game.reconnectPlayerId = null
+          game.reconnectEndsAt = null
+          game.turnEndsAt = Date.now() + Math.max(0, game.turnRemainingMs ?? 0)
+          game.turnRemainingMs = null
+          addActivity(game, `${player.name} reconnected.`, 'good', 'connection', { playerId: player.id })
+        }
+      } else if (game.phase === 'resolving' && game.resolutionEndsAt && game.resolutionEndsAt <= Date.now()) {
+        this.completeResolution(room)
+      }
+    }
     this.changed(room)
-    return { room, credentials: { code, playerId: player.id, token: player.token } }
+    return { room, credentials: { code, playerId: player.id, token } }
   }
 
-  disconnect(socketId: string): Room | null {
+  disconnect(socketId: string): Room[] {
+    const changedRooms: Room[] = []
     for (const room of this.rooms.values()) {
-      const player = room.players.find((candidate) => candidate.socketId === socketId)
-      if (!player) continue
-      player.connected = false
-      player.socketId = null
-      if (room.status !== 'playing') ensureConnectedHost(room)
-      if (room.status === 'lobby' && room.players.every((candidate) => !candidate.connected)) {
-        room.updatedAt = Date.now()
+      const matches = room.players.filter((candidate) => candidate.socketId === socketId)
+      if (!matches.length) continue
+      for (const player of matches) {
+        player.connected = false
+        player.socketId = null
+        const game = room.game
+        if (room.status === 'playing' && game?.phase === 'turn' && game.currentTurnId === player.id && !player.reconnectGraceUsed) {
+          this.beginReconnectWait(room, player)
+          addActivity(game, `Waiting for ${player.name} to reconnect.`, 'warning', 'connection', { playerId: player.id })
+        }
+      }
+      ensureConnectedHost(room)
+      this.changed(room)
+      changedRooms.push(room)
+    }
+    return changedRooms
+  }
+
+  leaveRoom(roomCode: string, playerId: string, socketId?: string): RoomLeaveResult {
+    const room = this.requireRoom(roomCode)
+    const player = this.requirePlayer(room, playerId)
+    if (socketId !== undefined && player.socketId !== socketId) throw new Error('Reconnect to your seat and try again.')
+    const result: RoomLeaveResult = {
+      code: room.code,
+      roomDeleted: false,
+      leftDuringPlay: room.status === 'playing',
+    }
+
+    if (room.status !== 'playing') {
+      room.players = room.players.filter((candidate) => candidate.id !== player.id)
+      ensureConnectedHost(room)
+      if (!room.players.some((candidate) => !candidate.isBot)) {
+        result.roomDeleted = true
+        this.deleteRoom(room)
       } else {
         this.changed(room)
       }
-      return room
+      return result
     }
-    return null
+
+    const game = room.game!
+    // A deliberate leave is final for this round: rotate the hash so saved credentials cannot reclaim it.
+    player.tokenHash = hashToken(randomBytes(32).toString('base64url'))
+    player.socketId = null
+    player.reconnectGraceUsed = true
+    player.ready = true
+    player.rematchReady = true
+    if (room.settings.allowBots) {
+      player.isBot = true
+      player.connected = true
+      addActivity(game, `${player.name}'s seat will continue as a bot.`, 'warning', 'connection', { playerId: player.id })
+    } else {
+      player.connected = false
+      addActivity(game, `${player.name} left; their seat will continue automatically.`, 'warning', 'connection', { playerId: player.id })
+    }
+    if (game.phase === 'waiting_for_reconnect' && game.reconnectPlayerId === player.id) {
+      game.phase = 'turn'
+      game.reconnectPlayerId = null
+      game.reconnectEndsAt = null
+      game.turnRemainingMs = null
+      game.turnEndsAt = null
+    }
+    ensureConnectedHost(room)
+    this.changed(room)
+    return result
+  }
+
+  setReady(roomCode: string, playerId: string, value: unknown): void {
+    const room = this.requireRoom(roomCode)
+    if (room.status !== 'lobby') throw new Error('Ready status can only be changed in the lobby.')
+    const player = this.requirePlayer(room, playerId)
+    if (player.isBot) throw new Error('Bots are always ready.')
+    if (typeof value !== 'boolean') throw new Error('Ready status must be true or false.')
+    player.ready = value
+    this.changed(room)
+  }
+
+  updateSettings(roomCode: string, playerId: string, patch: unknown): void {
+    const room = this.requireRoom(roomCode)
+    const host = this.requireHost(room, playerId)
+    if (!host || room.status === 'playing') throw new Error('Settings can only be changed between rounds.')
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Invalid room settings.')
+    const value = patch as Record<string, unknown>
+    const allowed = new Set(['turnSeconds', 'allowBots', 'reactionsEnabled', 'tutorialHints'])
+    if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error('Unknown room setting.')
+    const nextSettings: RoomSettings = { ...room.settings }
+    if (value.turnSeconds !== undefined) {
+      if (!TURN_SECONDS.includes(value.turnSeconds as TurnSeconds)) throw new Error('Turn time must be 20, 35, or 60 seconds.')
+      nextSettings.turnSeconds = value.turnSeconds as TurnSeconds
+    }
+    for (const key of ['allowBots', 'reactionsEnabled', 'tutorialHints'] as const) {
+      if (value[key] !== undefined) {
+        if (typeof value[key] !== 'boolean') throw new Error(`${key} must be true or false.`)
+        nextSettings[key] = value[key] as boolean
+      }
+    }
+    if (!nextSettings.allowBots && room.players.some((player) => player.isBot)) {
+      throw new Error('Remove existing bots before disabling bots.')
+    }
+    room.settings = nextSettings
+    this.changed(room)
+  }
+
+  kickPlayer(roomCode: string, hostId: string, targetId: unknown): Player {
+    const room = this.requireRoom(roomCode)
+    this.requireHost(room, hostId)
+    if (room.status === 'playing') throw new Error('Players cannot be removed during a match.')
+    if (typeof targetId !== 'string') throw new Error('Choose a player to remove.')
+    const target = this.requirePlayer(room, targetId)
+    if (target.id === hostId) throw new Error('The host cannot remove themselves.')
+    room.players = room.players.filter((player) => player.id !== target.id)
+    ensureConnectedHost(room)
+    this.changed(room)
+    return target
+  }
+
+  addBot(roomCode: string, hostId: string, nameValue?: unknown): Player {
+    const room = this.requireRoom(roomCode)
+    this.requireHost(room, hostId)
+    if (room.status === 'playing') throw new Error('Bots can only be added between rounds.')
+    if (!room.settings.allowBots) throw new Error('Bots are disabled for this room.')
+    if (room.players.length >= 8) throw new Error('This room is full.')
+    const botCount = room.players.filter((player) => player.isBot).length + 1
+    const name = nameValue === undefined || nameValue === '' ? `Bot ${botCount}` : nameValue
+    const { player } = this.makePlayer(name, null, false, true)
+    room.players.push(player)
+    this.ensureScore(room, player)
+    this.changed(room)
+    return player
+  }
+
+  removeBot(roomCode: string, hostId: string, targetId: unknown): void {
+    const room = this.requireRoom(roomCode)
+    this.requireHost(room, hostId)
+    if (room.status === 'playing') throw new Error('Bots cannot be removed during a match.')
+    if (typeof targetId !== 'string') throw new Error('Choose a bot to remove.')
+    const target = this.requirePlayer(room, targetId)
+    if (!target.isBot) throw new Error('That player is not a bot.')
+    room.players = room.players.filter((player) => player.id !== target.id)
+    this.changed(room)
+  }
+
+  replaceDisconnectedWithBot(roomCode: string, hostId: string, targetId: unknown): void {
+    const room = this.requireRoom(roomCode)
+    this.requireHost(room, hostId)
+    if (room.status !== 'playing' || !room.game) throw new Error('A replacement is only needed during a match.')
+    if (!room.settings.allowBots) throw new Error('Bots are disabled for this room.')
+    if (typeof targetId !== 'string') throw new Error('Choose a disconnected player.')
+    const target = this.requirePlayer(room, targetId)
+    if (target.isBot || target.connected) throw new Error('Only a disconnected player can be replaced.')
+    target.isBot = true
+    target.connected = true
+    target.socketId = null
+    target.ready = true
+    target.rematchReady = true
+    target.reconnectGraceUsed = true
+    const game = room.game
+    if (game.phase === 'waiting_for_reconnect' && game.reconnectPlayerId === target.id) {
+      game.phase = 'turn'
+      game.reconnectPlayerId = null
+      game.reconnectEndsAt = null
+      game.turnRemainingMs = null
+      game.turnEndsAt = null
+    }
+    addActivity(game, `${target.name}'s seat is now playing as a bot.`, 'warning', 'connection', { playerId: target.id })
+    this.changed(room)
+  }
+
+  setRematchReady(roomCode: string, playerId: string, value: unknown): void {
+    const room = this.requireRoom(roomCode)
+    if (room.status !== 'finished') throw new Error('The current round has not finished.')
+    const player = this.requirePlayer(room, playerId)
+    if (player.isBot) throw new Error('Bots are always ready.')
+    if (typeof value !== 'boolean') throw new Error('Rematch status must be true or false.')
+    player.rematchReady = value
+    this.changed(room)
+  }
+
+  resetSession(roomCode: string, hostId: string): void {
+    const room = this.requireRoom(roomCode)
+    this.requireHost(room, hostId)
+    if (room.status === 'playing') throw new Error('The scoreboard cannot be reset during a match.')
+    room.session.roundNumber = 0
+    room.session.scores = room.players.map(newScore)
+    this.changed(room)
+  }
+
+  createReaction(roomCode: string, playerId: string, reactionValue: unknown): ReactionEvent {
+    const room = this.requireRoom(roomCode)
+    if (!room.settings.reactionsEnabled) throw new Error('Reactions are disabled in this room.')
+    const player = this.requirePlayer(room, playerId)
+    if (typeof reactionValue !== 'string' || !REACTIONS.includes(reactionValue as Reaction)) {
+      throw new Error('Choose an available reaction.')
+    }
+    return {
+      id: randomUUID(),
+      playerId: player.id,
+      playerName: player.name,
+      reaction: reactionValue as Reaction,
+      createdAt: Date.now(),
+    }
   }
 
   startGame(roomCode: string, playerId: string): void {
     const room = this.requireRoom(roomCode)
-    const requester = room.players.find((player) => player.id === playerId)
-    if (!requester?.isHost) throw new Error('Only the room host can start the match.')
+    this.requireHost(room, playerId)
     if (room.status === 'playing') throw new Error('The match is already in progress.')
+    const blockReason = this.startBlockReason(room)
+    if (blockReason) throw new Error(blockReason)
 
-    room.players = room.players.filter((player) => player.connected)
-    if (room.players.length < 3) throw new Error('At least 3 connected players are required.')
-    room.players.forEach((player, index) => {
-      player.isHost = index === 0
+    room.players = room.players.filter((player) => player.isBot || player.connected)
+    room.players.forEach((player) => {
       player.hand = []
       player.escaped = false
+      player.ready = player.isBot || !player.usesReadyProtocol
+      player.rematchReady = player.isBot || !player.usesReadyProtocol
+      player.reconnectGraceUsed = false
+      this.ensureScore(room, player)
     })
+    ensureConnectedHost(room)
 
     const deck = shuffle(makeDeck())
     deck.forEach((card, index) => room.players[index % room.players.length].hand.push(card))
@@ -222,9 +641,16 @@ export class GameManager {
     if (!opener) throw new Error('The deck could not be dealt correctly.')
 
     room.status = 'playing'
+    room.session.roundNumber += 1
     room.game = {
+      phase: 'turn',
       trick: [],
       resolvedTrick: null,
+      resolutionEndsAt: null,
+      pendingTurnId: null,
+      pendingLoserId: null,
+      pendingWasteLeadPlayerId: null,
+      pendingWasteCards: [],
       waste: [],
       leadSuit: null,
       leaderId: opener.id,
@@ -233,9 +659,16 @@ export class GameManager {
       takeUsedForLead: false,
       loserId: null,
       turnEndsAt: null,
+      turnRemainingMs: null,
+      reconnectPlayerId: null,
+      reconnectEndsAt: null,
+      roundEscapeOrder: [],
+      roundPlayerIds: room.players.map((player) => player.id),
+      scoreRecorded: false,
       activity: [],
     }
-    addActivity(room.game, `${opener.name} has the Ace of Spades and opens. Play moves anticlockwise to the right.`)
+    addActivity(room.game, `${opener.name} has the Ace of Spades and opens. Play moves anticlockwise to the right.`, 'neutral', 'general', { openerId: opener.id })
+    room.suspended = false
     this.changed(room)
   }
 
@@ -243,18 +676,20 @@ export class GameManager {
     const room = this.requireRoom(roomCode)
     const game = room.game
     if (room.status !== 'playing' || !game) throw new Error('There is no active match.')
+    if (game.phase === 'resolving') throw new Error('The completed trick is still being shown.')
+    if (game.phase === 'waiting_for_reconnect') throw new Error('The match is waiting for a player to reconnect.')
     if (game.currentTurnId !== playerId) throw new Error('Wait for your turn.')
-    const player = room.players.find((candidate) => candidate.id === playerId)
-    if (!player || player.escaped) throw new Error('You are no longer active in this match.')
+    const player = this.requirePlayer(room, playerId)
+    if (player.escaped) throw new Error('You are no longer active in this match.')
+    if (typeof cardId !== 'string' || cardId.length > 32) throw new Error('Choose a valid card.')
     const legalCards = this.legalCards(room, playerId)
     const card = legalCards.find((candidate) => candidate.id === cardId)
     if (!card) throw new Error('You must follow the led suit when you can.')
 
     game.turnEndsAt = null
-    game.resolvedTrick = null
     player.hand = player.hand.filter((candidate) => candidate.id !== card.id)
     game.trick.push({ playerId, card })
-    if (automatic) addActivity(game, `${player.name} ran out of time; ${card.rank} of ${card.suit} was played automatically.`, 'warning')
+    if (automatic) addActivity(game, `${player.name} ran out of time; ${card.rank} of ${card.suit} was played automatically.`, 'warning', 'general', { playerId, cardId: card.id })
 
     if (game.trick.length === 1) {
       game.leadSuit = card.suit
@@ -287,23 +722,26 @@ export class GameManager {
     const room = this.requireRoom(roomCode)
     const game = room.game
     if (room.status !== 'playing' || !game) throw new Error('There is no active match.')
-    if (game.firstTrick || game.trick.length > 0) throw new Error('You can only take the right-hand player’s cards before leading a new trick.')
+    if (game.phase !== 'turn') throw new Error('Wait for the next trick to begin.')
+    if (game.firstTrick || game.trick.length > 0) throw new Error("You can only take the right-hand player's cards before leading a new trick.")
     if (game.currentTurnId !== playerId) throw new Error('Only the player with the power can take the right-hand cards.')
     if (game.takeUsedForLead) throw new Error('You already used the right-hand option for this trick.')
 
-    const player = room.players.find((candidate) => candidate.id === playerId)
+    const player = this.requirePlayer(room, playerId)
     const target = nextActive(room, playerId)
-    if (!player || player.escaped || !target || target.id === player.id) throw new Error('There is no active player on your right.')
+    if (player.escaped || !target || target.id === player.id) throw new Error('There is no active player on your right.')
 
     const takenCount = target.hand.length
     player.hand = sortCards([...player.hand, ...target.hand])
     target.hand = []
-    target.escaped = true
+    this.markEscaped(room, target)
     game.takeUsedForLead = true
     game.turnEndsAt = null
-    addActivity(game, `${player.name} took ${takenCount} cards from ${target.name} on the right. ${target.name} got away.`, 'warning', 'take')
+    addActivity(game, `${player.name} took ${takenCount} cards from ${target.name} on the right. ${target.name} got away.`, 'warning', 'take', { playerId, targetId: target.id, cardCount: takenCount })
 
-    if (!this.finishIfOneRemains(room)) {
+    const loserId = this.onlyRemainingPlayerId(room)
+    if (loserId) this.finalizeMatch(room, loserId)
+    else {
       game.currentTurnId = player.id
       game.leaderId = player.id
     }
@@ -313,10 +751,8 @@ export class GameManager {
   legalCards(room: Room, playerId: string): Card[] {
     const game = room.game
     const player = room.players.find((candidate) => candidate.id === playerId)
-    if (!game || !player || game.currentTurnId !== playerId) return []
-    if (game.firstTrick && game.trick.length === 0) {
-      return player.hand.filter((card) => card.id === 'spades-A')
-    }
+    if (!game || game.phase !== 'turn' || !player || game.currentTurnId !== playerId) return []
+    if (game.firstTrick && game.trick.length === 0) return player.hand.filter((card) => card.id === 'spades-A')
     if (!game.leadSuit || game.trick.length === 0) return player.hand
     const followingSuit = player.hand.filter((card) => card.suit === game.leadSuit)
     return followingSuit.length ? followingSuit : player.hand
@@ -330,125 +766,241 @@ export class GameManager {
     }
     const winner = highestLedCard(game.trick, 'spades')
     const completed = [...game.trick]
-    game.resolvedTrick = {
+    game.waste.push(...completed.map((entry) => entry.card))
+    game.firstTrick = false
+    addActivity(game, 'Opening trick cleared. The Ace of Spades keeps the power.', 'good', 'power', { winnerId: winner.playerId })
+    this.beginResolution(room, {
       cards: completed,
       kind: 'opening',
       winnerId: winner.playerId,
       lastPlayerId: player.id,
-    }
-    game.waste.push(...completed.map((entry) => entry.card))
-    game.trick = []
-    game.leadSuit = null
-    game.leaderId = winner.playerId
-    game.currentTurnId = winner.playerId
-    game.firstTrick = false
-    game.takeUsedForLead = false
-    addActivity(game, 'Opening trick cleared. The Ace of Spades keeps the power.', 'good', 'power')
+    }, winner.playerId)
   }
 
   private resolveThulla(room: Room, thullaPlayer: Player): void {
     const game = room.game!
     const completed = [...game.trick]
     const winnerEntry = highestLedCard(completed, game.leadSuit!)
-    const winner = room.players.find((player) => player.id === winnerEntry.playerId)!
+    const winner = this.requirePlayer(room, winnerEntry.playerId)
     winner.hand = sortCards([...winner.hand, ...completed.map((entry) => entry.card)])
-    game.resolvedTrick = {
+    addActivity(game, `${thullaPlayer.name} played a THULLA! ${winner.name} picked up ${completed.length} cards.`, 'warning', 'thulla', { thullaPlayerId: thullaPlayer.id, winnerId: winner.id, cardCount: completed.length })
+    this.escapeEmptyPlayers(room, winner.id)
+    this.beginResolution(room, {
       cards: completed,
       kind: 'thulla',
       winnerId: winner.id,
       lastPlayerId: thullaPlayer.id,
-    }
-    addActivity(game, `${thullaPlayer.name} played a THULLA! ${winner.name} picked up ${completed.length} cards.`, 'warning', 'thulla')
-    game.trick = []
-    game.leadSuit = null
-    game.leaderId = winner.id
-    game.takeUsedForLead = false
-    this.escapeEmptyPlayers(room, winner.id)
-    if (this.finishIfOneRemains(room)) return
-    game.currentTurnId = winner.id
+    }, winner.id, this.onlyRemainingPlayerId(room))
   }
 
   private resolveCleanTrick(room: Room): void {
     const game = room.game!
     const completed = [...game.trick]
     const winnerEntry = highestLedCard(completed, game.leadSuit!)
-    const winner = room.players.find((player) => player.id === winnerEntry.playerId)!
-    game.resolvedTrick = {
+    const winner = this.requirePlayer(room, winnerEntry.playerId)
+    this.escapeEmptyPlayers(room, winner.id)
+    const loserId = this.onlyRemainingPlayerId(room)
+    const needsWasteLead = !loserId && winner.hand.length === 0
+    if (needsWasteLead) {
+      addActivity(game, `${winner.name} kept the power and will draw a card from the waste to lead.`, 'warning', 'power', { winnerId: winner.id })
+    } else if (!loserId) {
+      addActivity(game, `${winner.name} won the trick and has the power.`, 'neutral', 'power', { winnerId: winner.id })
+    }
+    this.beginResolution(room, {
       cards: completed,
       kind: 'clean',
       winnerId: winner.id,
       lastPlayerId: completed[completed.length - 1].playerId,
-    }
+    }, winner.id, loserId, needsWasteLead ? winner.id : null, completed.map((entry) => entry.card))
+  }
+
+  private beginResolution(
+    room: Room,
+    resolved: ResolvedTrick,
+    pendingTurnId: string,
+    pendingLoserId: string | null = null,
+    pendingWasteLeadPlayerId: string | null = null,
+    pendingWasteCards: Card[] = [],
+  ): void {
+    const game = room.game!
+    game.phase = 'resolving'
+    game.resolvedTrick = resolved
+    game.resolutionEndsAt = Date.now() + TRICK_RESOLUTION_MS
+    game.pendingTurnId = pendingTurnId
+    game.pendingLoserId = pendingLoserId
+    game.pendingWasteLeadPlayerId = pendingWasteLeadPlayerId
+    game.pendingWasteCards = pendingWasteCards
     game.trick = []
     game.leadSuit = null
-    game.leaderId = winner.id
+    game.leaderId = pendingTurnId
+    game.currentTurnId = null
+    game.turnEndsAt = null
+    game.turnRemainingMs = null
+    game.reconnectPlayerId = null
+    game.reconnectEndsAt = null
     game.takeUsedForLead = false
-    this.escapeEmptyPlayers(room, winner.id)
+  }
 
-    if (this.finishIfOneRemains(room)) {
-      game.waste.push(...completed.map((entry) => entry.card))
+  private completeResolution(room: Room): void {
+    const game = room.game
+    if (!game || game.phase !== 'resolving') return
+    const pendingTurnId = game.pendingTurnId
+    const pendingLoserId = game.pendingLoserId
+    const wasteLeaderId = game.pendingWasteLeadPlayerId
+    const pendingWasteCards = game.pendingWasteCards
+    game.resolvedTrick = null
+    game.resolutionEndsAt = null
+    game.pendingTurnId = null
+    game.pendingLoserId = null
+    game.pendingWasteLeadPlayerId = null
+    game.pendingWasteCards = []
+
+    if (pendingLoserId) {
+      game.waste.push(...pendingWasteCards)
+      this.finalizeMatch(room, pendingLoserId)
       return
     }
 
-    if (winner.hand.length === 0) {
+    game.phase = 'turn'
+    game.currentTurnId = pendingTurnId
+    game.turnEndsAt = null
+    if (wasteLeaderId) {
+      if (!game.waste.length) throw new Error('No waste card is available for the power lead.')
       const drawnIndex = randomInt(game.waste.length)
       const [drawn] = game.waste.splice(drawnIndex, 1)
-      game.trick = [{ playerId: winner.id, card: drawn }]
+      game.trick = [{ playerId: wasteLeaderId, card: drawn }]
       game.leadSuit = drawn.suit
-      game.leaderId = winner.id
-      game.currentTurnId = nextActive(room, winner.id)?.id ?? null
+      game.leaderId = wasteLeaderId
+      game.currentTurnId = nextActive(room, wasteLeaderId)?.id ?? null
       game.takeUsedForLead = true
-      addActivity(game, `${winner.name} kept the power and drew a card from the waste to lead.`, 'warning', 'power')
-    } else {
-      game.currentTurnId = winner.id
-      addActivity(game, `${winner.name} won the trick and has the power.`, 'neutral', 'power')
     }
-    game.waste.push(...completed.map((entry) => entry.card))
+    game.waste.push(...pendingWasteCards)
   }
 
   private escapeEmptyPlayers(room: Room, exceptPlayerId: string): void {
     for (const player of room.players) {
-      if (!player.escaped && player.id !== exceptPlayerId && player.hand.length === 0) {
-        player.escaped = true
-        addActivity(room.game!, `${player.name} got away and is safe!`, 'good', 'escape')
-      }
+      if (!player.escaped && player.id !== exceptPlayerId && player.hand.length === 0) this.markEscaped(room, player)
     }
   }
 
-  private finishIfOneRemains(room: Room): boolean {
+  private markEscaped(room: Room, player: Player): void {
+    if (player.escaped) return
+    player.escaped = true
+    room.game?.roundEscapeOrder.push(player.id)
+    if (room.game) addActivity(room.game, `${player.name} got away and is safe!`, 'good', 'escape', { playerId: player.id })
+  }
+
+  private onlyRemainingPlayerId(room: Room): string | null {
     const remaining = activePlayers(room)
-    if (remaining.length > 1) return false
-    const loser = remaining[0]
+    return remaining.length <= 1 ? remaining[0]?.id ?? null : null
+  }
+
+  private finalizeMatch(room: Room, loserId: string): void {
+    const game = room.game!
     room.status = 'finished'
-    room.game!.loserId = loser?.id ?? null
-    room.game!.currentTurnId = null
-    room.game!.turnEndsAt = null
+    game.phase = 'turn'
+    game.loserId = loserId
+    game.currentTurnId = null
+    game.turnEndsAt = null
+    game.turnRemainingMs = null
+    game.reconnectPlayerId = null
+    game.reconnectEndsAt = null
+    const loser = this.requirePlayer(room, loserId)
+    addActivity(game, `${loser.name} is the Bhabhi!`, 'warning', 'round', { loserId })
+    this.recordScore(room, loserId)
+    for (const player of room.players) player.rematchReady = player.isBot || !player.usesReadyProtocol
     ensureConnectedHost(room)
-    if (loser) addActivity(room.game!, `${loser.name} is the Bhabhi!`, 'warning', 'round')
-    return true
+  }
+
+  private recordScore(room: Room, loserId: string): void {
+    const game = room.game!
+    if (game.scoreRecorded) return
+    game.scoreRecorded = true
+    const firstEscapeId = game.roundEscapeOrder[0] ?? null
+    for (const playerId of game.roundPlayerIds) {
+      const player = room.players.find((candidate) => candidate.id === playerId)
+      if (!player) continue
+      const score = this.ensureScore(room, player)
+      score.playerName = player.name
+      score.roundsPlayed += 1
+      if (playerId === loserId) {
+        score.bhabhiCount += 1
+        score.currentBhabhiStreak += 1
+        score.bestBhabhiStreak = Math.max(score.bestBhabhiStreak, score.currentBhabhiStreak)
+      } else {
+        score.escapes += 1
+        score.currentBhabhiStreak = 0
+      }
+      if (playerId === firstEscapeId) score.firstEscapes += 1
+    }
+  }
+
+  private ensureScore(room: Room, player: Player): SessionScore {
+    let score = room.session.scores.find((candidate) => candidate.playerId === player.id)
+    if (!score) {
+      score = newScore(player)
+      room.session.scores.push(score)
+    }
+    return score
+  }
+
+  private beginReconnectWait(room: Room, player: Player): void {
+    const game = room.game!
+    const now = Date.now()
+    player.reconnectGraceUsed = true
+    game.phase = 'waiting_for_reconnect'
+    game.turnRemainingMs = Math.max(0, (game.turnEndsAt ?? now + room.settings.turnSeconds * 1_000) - now)
+    game.turnEndsAt = null
+    game.reconnectPlayerId = player.id
+    game.reconnectEndsAt = now + RECONNECT_GRACE_MS
+  }
+
+  private expireReconnectWait(room: Room, expectedPlayerId: string): void {
+    const game = room.game
+    if (!game || game.phase !== 'waiting_for_reconnect' || game.reconnectPlayerId !== expectedPlayerId) return
+    const player = this.requirePlayer(room, expectedPlayerId)
+    player.reconnectGraceUsed = true
+    game.phase = 'turn'
+    game.reconnectPlayerId = null
+    game.reconnectEndsAt = null
+    game.turnRemainingMs = null
+    game.turnEndsAt = null
+    addActivity(game, `${player.name} did not reconnect; play continues automatically.`, 'warning', 'connection', { playerId: player.id })
+    const legal = this.legalCards(room, expectedPlayerId)
+    if (legal.length) this.playCard(room.code, expectedPlayerId, this.chooseBotCard(legal).id, true)
+    else this.changed(room)
+  }
+
+  private chooseBotCard(cards: Card[]): Card {
+    return [...cards].sort((a, b) => rankValue(a.rank) - rankValue(b.rank) || SUITS.indexOf(a.suit) - SUITS.indexOf(b.suit))[0]
   }
 
   view(room: Room, viewerId: string): RoomView {
-    const viewer = room.players.find((player) => player.id === viewerId)
-    if (!viewer) throw new Error('Player is not in this room.')
+    const viewer = this.requirePlayer(room, viewerId)
+    const game = room.game
     const canTakeRightHand = Boolean(
       room.status === 'playing'
-      && room.game
-      && !room.game.firstTrick
-      && room.game.trick.length === 0
-      && room.game.currentTurnId === viewerId
-      && !room.game.takeUsedForLead
+      && game?.phase === 'turn'
+      && !game.firstTrick
+      && game.trick.length === 0
+      && game.currentTurnId === viewerId
+      && !game.takeUsedForLead
       && !viewer.escaped
       && activePlayers(room).length > 1,
     )
     const takeTarget = canTakeRightHand ? nextActive(room, viewerId) : null
+    const startBlockReason = this.startBlockReason(room)
     return {
+      protocolVersion: PROTOCOL_VERSION,
       code: room.code,
       status: room.status,
       yourPlayerId: viewerId,
-      canStart: viewer.isHost && room.status !== 'playing' && room.players.filter((player) => player.connected).length >= 3,
+      canStart: viewer.isHost && !startBlockReason,
+      startBlockReason: viewer.isHost ? startBlockReason : 'Only the host can start the match.',
       minPlayers: 3,
       maxPlayers: 8,
+      settings: room.settings,
+      session: room.session,
       players: room.players.map((player) => ({
         id: player.id,
         name: player.name,
@@ -457,61 +1009,105 @@ export class GameManager {
         escaped: player.escaped,
         isHost: player.isHost,
         isYou: player.id === viewerId,
+        ready: player.ready,
+        isBot: player.isBot,
+        rematchReady: player.rematchReady,
+        reconnecting: game?.phase === 'waiting_for_reconnect' && game.reconnectPlayerId === player.id,
+        reconnectEndsAt: game?.phase === 'waiting_for_reconnect' && game.reconnectPlayerId === player.id ? game.reconnectEndsAt : null,
       })),
-      game: room.game
+      game: game
         ? {
+            phase: game.phase,
             hand: viewer.hand,
             legalCardIds: this.legalCards(room, viewerId).map((card) => card.id),
-            trick: room.game.trick.map((entry) => ({
+            trick: game.trick.map((entry) => ({
               playerId: entry.playerId,
               playerName: room.players.find((player) => player.id === entry.playerId)?.name ?? 'Player',
               card: entry.card,
             })),
-            resolvedTrick: room.game.resolvedTrick
+            resolvedTrick: game.resolvedTrick
               ? {
-                  ...room.game.resolvedTrick,
-                  cards: room.game.resolvedTrick.cards.map((entry) => ({
+                  ...game.resolvedTrick,
+                  cards: game.resolvedTrick.cards.map((entry) => ({
                     playerId: entry.playerId,
                     playerName: room.players.find((player) => player.id === entry.playerId)?.name ?? 'Player',
                     card: entry.card,
                   })),
                 }
               : null,
-            leadSuit: room.game.leadSuit,
-            currentTurnId: room.game.currentTurnId,
-            leaderId: room.game.leaderId,
-            firstTrick: room.game.firstTrick,
+            resolutionEndsAt: game.resolutionEndsAt,
+            pendingTurnId: game.pendingTurnId,
+            leadSuit: game.leadSuit,
+            currentTurnId: game.currentTurnId,
+            leaderId: game.leaderId,
+            firstTrick: game.firstTrick,
             canTakeRightHand,
             takeTargetId: takeTarget?.id ?? null,
-            wasteCount: room.game.waste.length,
-            loserId: room.game.loserId,
-            turnEndsAt: room.game.turnEndsAt,
-            activity: room.game.activity,
+            wasteCount: game.waste.length,
+            loserId: game.loserId,
+            turnEndsAt: game.turnEndsAt,
+            reconnectPlayerId: game.reconnectPlayerId,
+            reconnectEndsAt: game.reconnectEndsAt,
+            activity: game.activity,
           }
         : null,
     }
   }
 
   removeStaleRooms(): void {
-    const cutoff = Date.now() - 6 * 60 * 60 * 1000
+    const cutoff = Date.now() - ROOM_TTL_MS
     for (const room of this.rooms.values()) {
-      if (room.updatedAt < cutoff && room.players.every((player) => !player.connected)) {
-        this.clearTimer(room.code)
-        this.rooms.delete(room.code)
+      if (room.updatedAt < cutoff && room.players.every((player) => player.isBot || !player.connected)) {
+        this.deleteRoom(room)
       }
     }
   }
 
-  private requireRoom(code: string): Room {
-    const room = this.rooms.get(code)
+  private startBlockReason(room: Room): string | null {
+    if (room.status === 'playing') return 'The match is already in progress.'
+    const participants = room.players.filter((player) => player.isBot || player.connected)
+    if (participants.length < 3) return 'At least 3 connected players are required.'
+    if (room.status === 'lobby') {
+      const waiting = participants.filter((player) => !player.ready)
+      if (waiting.length) return `Waiting for ${waiting.map((player) => player.name).join(', ')} to get ready.`
+    } else {
+      const waiting = participants.filter((player) => !player.rematchReady)
+      if (waiting.length) return `Waiting for ${waiting.map((player) => player.name).join(', ')} to accept the rematch.`
+    }
+    return null
+  }
+
+  private requireRoom(codeValue: unknown): Room {
+    if (typeof codeValue !== 'string') throw new Error('Room no longer exists.')
+    const room = this.rooms.get(codeValue.trim().toUpperCase())
     if (!room) throw new Error('Room no longer exists.')
     return room
   }
 
+  private deleteRoom(room: Room): void {
+    this.clearTimer(room.code)
+    this.rooms.delete(room.code)
+    void this.persistence.delete(room.code).catch((error) => console.error('room_store_delete_failed', { code: room.code, error: String(error) }))
+  }
+
+  private requirePlayer(room: Room, playerId: unknown): Player {
+    if (typeof playerId !== 'string') throw new Error('Player is not in this room.')
+    const player = room.players.find((candidate) => candidate.id === playerId)
+    if (!player) throw new Error('Player is not in this room.')
+    return player
+  }
+
+  private requireHost(room: Room, playerId: unknown): Player {
+    const player = this.requirePlayer(room, playerId)
+    if (!player.isHost) throw new Error('Only the room host can do that.')
+    return player
+  }
+
   private changed(room: Room): void {
     room.updatedAt = Date.now()
-    this.scheduleTurn(room)
+    this.scheduleRoom(room)
     this.publisher(room)
+    void this.persistence.save(room).catch((error) => console.error('room_store_save_failed', { code: room.code, error: String(error) }))
   }
 
   private clearTimer(code: string): void {
@@ -520,19 +1116,59 @@ export class GameManager {
     this.timers.delete(code)
   }
 
-  private scheduleTurn(room: Room): void {
+  private scheduleRoom(room: Room): void {
     this.clearTimer(room.code)
-    if (room.status !== 'playing' || !room.game?.currentTurnId) return
-    const deadline = room.game.turnEndsAt && room.game.turnEndsAt > Date.now()
-      ? room.game.turnEndsAt
-      : Date.now() + TURN_LENGTH_MS
-    room.game.turnEndsAt = deadline
-    const expectedPlayer = room.game.currentTurnId
+    const game = room.game
+    if (room.suspended || room.status !== 'playing' || !game) return
+    const now = Date.now()
+
+    if (game.phase === 'resolving') {
+      const deadline = game.resolutionEndsAt ?? now + TRICK_RESOLUTION_MS
+      game.resolutionEndsAt = deadline
+      const timer = setTimeout(() => {
+        if (room.game?.phase !== 'resolving' || room.game.resolutionEndsAt !== deadline) return
+        this.completeResolution(room)
+        this.changed(room)
+      }, Math.max(1, deadline - now))
+      timer.unref()
+      this.timers.set(room.code, timer)
+      return
+    }
+
+    if (game.phase === 'waiting_for_reconnect') {
+      const expectedPlayer = game.reconnectPlayerId
+      if (!expectedPlayer) return
+      const deadline = game.reconnectEndsAt ?? now + RECONNECT_GRACE_MS
+      game.reconnectEndsAt = deadline
+      const timer = setTimeout(() => this.expireReconnectWait(room, expectedPlayer), Math.max(1, deadline - now))
+      timer.unref()
+      this.timers.set(room.code, timer)
+      return
+    }
+
+    if (!game.currentTurnId) return
+    const player = room.players.find((candidate) => candidate.id === game.currentTurnId)
+    if (!player) return
+
+    if (!player.connected && !player.isBot && !player.reconnectGraceUsed) {
+      this.beginReconnectWait(room, player)
+      this.scheduleRoom(room)
+      return
+    }
+
+    const isAutomaticSeat = player.isBot || !player.connected
+    const deadline = isAutomaticSeat
+      ? now + randomInt(700, 1_401)
+      : game.turnEndsAt !== null
+        ? game.turnEndsAt
+        : now + room.settings.turnSeconds * 1_000
+    game.turnEndsAt = isAutomaticSeat ? null : deadline
+    const expectedPlayer = game.currentTurnId
     const timer = setTimeout(() => {
-      if (room.status !== 'playing' || room.game?.currentTurnId !== expectedPlayer) return
+      if (room.status !== 'playing' || room.game?.phase !== 'turn' || room.game.currentTurnId !== expectedPlayer) return
       const legal = this.legalCards(room, expectedPlayer)
-      if (legal.length) this.playCard(room.code, expectedPlayer, legal[0].id, true)
-    }, Math.max(1, deadline - Date.now()))
+      if (legal.length) this.playCard(room.code, expectedPlayer, this.chooseBotCard(legal).id, true)
+    }, Math.max(1, deadline - now))
     timer.unref()
     this.timers.set(room.code, timer)
   }

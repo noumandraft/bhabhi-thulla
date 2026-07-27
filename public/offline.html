@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en-PK">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#073f35" />
+    <title>Reconnect to Bhabhi Thulla</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100dvh; display: grid; place-items: center; padding: 24px; color: #fffaf0; background: #073f35; font: 500 16px/1.6 system-ui, sans-serif; }
+      main { width: min(100%, 440px); padding: 32px; text-align: center; background: #0d5548; border: 1px solid rgb(255 250 240 / 18%); border-radius: 24px; }
+      img { width: 88px; height: 88px; }
+      h1 { margin: 16px 0 8px; font-size: clamp(28px, 8vw, 40px); line-height: 1.1; }
+      p { margin: 0 0 24px; color: rgb(255 250 240 / 78%); }
+      button { min-width: 160px; min-height: 48px; padding: 0 20px; color: #17362e; background: #f5cf68; border: 0; border-radius: 12px; font: inherit; font-weight: 800; cursor: pointer; }
+      button:focus-visible { outline: 3px solid #fffaf0; outline-offset: 3px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="/icons/icon.svg" alt="" width="88" height="88" />
+      <h1>Table disconnected</h1>
+      <p>Your seat is kept in this browser. Reconnect to the internet, then return to the table.</p>
+      <button type="button" onclick="location.reload()">Try again</button>
+    </main>
+  </body>
+</html>

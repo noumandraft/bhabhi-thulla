@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://thulla.joypad.fun/sitemap.xml

@@ -5,9 +5,17 @@ services:
     plan: free
     buildCommand: npm ci && npm run build:server
     startCommand: npm start
-    healthCheckPath: /health
+    healthCheckPath: /ready
     envVars:
       - key: NODE_VERSION
         value: 22
+      - key: NODE_ENV
+        value: production
       - key: CLIENT_ORIGIN
         value: https://thulla.joypad.fun
+      - key: REDIS_KEY_PREFIX
+        value: "bhabhi-thulla:room:"
+      # Add REDIS_URL in the Render dashboard when shared storage is available.
+      # Set this to true only for a provider that persists data across restart.
+      - key: REDIS_DURABLE
+        value: "false"

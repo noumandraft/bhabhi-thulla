@@ -12,6 +12,7 @@
     "build:server": "tsc -p tsconfig.server.json",
     "start": "node dist-server/server/index.js",
     "test": "vitest run server",
+    "qa:platform": "node scripts/platform-qa.mjs",
     "qa:visual": "node scripts/visual-qa.mjs",
     "test:watch": "vitest server"
   },
@@ -23,6 +24,7 @@
     "express": "^5.1.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "redis": "^5.12.1",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1"
   },

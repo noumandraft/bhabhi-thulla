@@ -116,7 +116,7 @@ async function evaluate(cdp, expression) {
   return response.result.value
 }
 
-async function waitForExpression(cdp, expression, attempts = 100) {
+async function waitForExpression(cdp, expression, attempts = 300) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (await evaluate(cdp, expression)) return
     await delay(100)
@@ -129,9 +129,9 @@ async function setViewport(cdp, width, height) {
     width,
     height,
     deviceScaleFactor: 1,
-    mobile: width <= 620,
+    mobile: false,
   })
-  await delay(60)
+  await waitForExpression(cdp, `innerWidth === ${width} && innerHeight === ${height}`)
 }
 
 const diagnosticsExpression = `(() => {
@@ -164,6 +164,19 @@ const diagnosticsExpression = `(() => {
   })
   const ids = [...document.querySelectorAll('[id]')].map((element) => element.id)
   const duplicateIds = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))]
+  const overflowingElements = [...document.querySelectorAll('body *')]
+    .filter(visible)
+    .map((element) => ({ element, box: element.getBoundingClientRect() }))
+    .filter(({ box }) => box.left < -1 || box.right > innerWidth + 1)
+    .slice(0, 12)
+    .map(({ element, box }) => ({
+      selector: element.tagName.toLowerCase()
+        + (element.id ? '#' + element.id : '')
+        + (typeof element.className === 'string' && element.className ? '.' + element.className.trim().replace(/\s+/g, '.') : ''),
+      left: Math.round(box.left),
+      right: Math.round(box.right),
+      width: Math.round(box.width),
+    }))
   const rightSeat = document.querySelector('.game-v2-seat.is-right-player')
   const rightBox = rightSeat?.getBoundingClientRect()
   const resolution = document.querySelector('.game-v2-resolution, [data-game-phase="resolving"]')
@@ -172,6 +185,20 @@ const diagnosticsExpression = `(() => {
   const thullaStatusRect = thullaStatus?.getBoundingClientRect()
   const lastCardRect = lastCard?.getBoundingClientRect()
   const lastCardStyle = lastCard ? getComputedStyle(lastCard) : null
+  const tableTalkDrawer = document.querySelector('.table-talk__drawer:not([hidden])')
+  const tableTalkDrawerRect = tableTalkDrawer?.getBoundingClientRect()
+  const tableTalkComposer = tableTalkDrawer?.querySelector('.table-talk__composer')
+  const tableTalkComposerRect = tableTalkComposer?.getBoundingClientRect()
+  const tableTalkTextareaRect = tableTalkDrawer?.querySelector('textarea')?.getBoundingClientRect()
+  const tableTalkSendRect = tableTalkDrawer?.querySelector('.table-talk__send')?.getBoundingClientRect()
+  const tableTalkTrigger = document.querySelector('.table-talk__trigger')
+  const currentTrick = document.querySelector('.game-v2-trick')
+  const currentTrickRect = currentTrick?.getBoundingClientRect()
+  const fullyInside = (inner, outer) => Boolean(inner && outer
+    && inner.left >= outer.left - 1
+    && inner.top >= outer.top - 1
+    && inner.right <= outer.right + 1
+    && inner.bottom <= outer.bottom + 1)
   const lastCardVisible = Boolean(lastCardRect && lastCardStyle
     && lastCardRect.width > 0
     && lastCardRect.height > 0
@@ -193,12 +220,30 @@ const diagnosticsExpression = `(() => {
     lastCardVisible,
     thullaStatusVisible: Boolean(thullaStatus),
     thullaStatusOverlapsLastCard,
+    tableTalkDrawerVisible: Boolean(tableTalkDrawerRect && visible(tableTalkDrawer)),
+    tableTalkDrawerFullyVisible: Boolean(tableTalkDrawerRect
+      && tableTalkDrawerRect.left >= -1
+      && tableTalkDrawerRect.top >= -1
+      && tableTalkDrawerRect.right <= innerWidth + 1
+      && tableTalkDrawerRect.bottom <= innerHeight + 1),
+    tableTalkComposerVisible: Boolean(tableTalkComposer && visible(tableTalkComposer)),
+    tableTalkComposerFullyVisible: fullyInside(tableTalkComposerRect, tableTalkDrawerRect),
+    tableTalkTextareaFullyVisible: fullyInside(tableTalkTextareaRect, tableTalkDrawerRect),
+    tableTalkSendFullyVisible: fullyInside(tableTalkSendRect, tableTalkDrawerRect),
+    tableTalkTriggerVisible: Boolean(tableTalkTrigger && visible(tableTalkTrigger)),
+    tableTalkOverlapsCurrentTrick: Boolean(tableTalkDrawerRect && currentTrickRect
+      && tableTalkDrawerRect.left < currentTrickRect.right
+      && tableTalkDrawerRect.right > currentTrickRect.left
+      && tableTalkDrawerRect.top < currentTrickRect.bottom
+      && tableTalkDrawerRect.bottom > currentTrickRect.top),
     clockVisible: Boolean(document.querySelector('.game-v2-clock, .turn-clock')),
+    liveReactionVisible: Boolean(document.querySelector('.game-v2-live-reaction')),
     emptyTrickVisible: Boolean(document.querySelector('.game-v2-empty-trick')),
     focusableDisplayCards: document.querySelectorAll('.game-v2-trick button, .game-v2-waste button, .waste-stack button, .current-trick button').length,
     touchViolations: controls.filter((control) => control.width < 44 || control.height < 44),
     unnamedControls: interactive.filter((element) => !named(element)).map((element) => element.outerHTML.slice(0, 160)),
     duplicateIds,
+    overflowingElements,
     controls,
   }
 })()`
@@ -302,23 +347,52 @@ try {
 
   const fixtureDefinitions = [
     { mode: 'lobby', selector: '.lobby-shell' },
+    { mode: 'playing', selector: '.game-v2-shell' },
     { mode: 'resolving', selector: '.game-v2-resolution' },
     { mode: 'reconnect', selector: '.game-v2-reconnect-banner' },
     { mode: 'finished', selector: '.game-v2-result' },
   ]
   const fixtureResults = {}
   for (const fixture of fixtureDefinitions) {
-    await cdp.send('Page.navigate', { url: `${CLIENT_URL}/?qa=${fixture.mode}` })
-    await waitForExpression(cdp, `Boolean(document.querySelector(${JSON.stringify(fixture.selector)}))`)
-    const portrait = await capture(cdp, `fixture-${fixture.mode}-mobile`, 390, 844)
-    const landscape = await capture(cdp, `fixture-${fixture.mode}-landscape`, 844, 390)
-    const desktop = fixture.mode === 'resolving' ? await capture(cdp, `fixture-${fixture.mode}-desktop`, 1366, 768) : null
-    fixtureResults[fixture.mode] = { portrait, landscape, desktop }
+    const fixtureUrl = `${CLIENT_URL}/?qa=${fixture.mode}`
+    const captureFreshFixture = async (name, width, height) => {
+      await cdp.send('Page.navigate', { url: fixtureUrl })
+      await waitForExpression(cdp, `Boolean(document.querySelector(${JSON.stringify(fixture.selector)}))`)
+      return capture(cdp, name, width, height)
+    }
+    const portrait = await captureFreshFixture(`fixture-${fixture.mode}-mobile`, 390, 844)
+    const landscape = await captureFreshFixture(`fixture-${fixture.mode}-landscape`, 844, 390)
+    const desktop = fixture.mode === 'resolving' ? await captureFreshFixture(`fixture-${fixture.mode}-desktop`, 1366, 768) : null
+    let chatOpen = null
+    if (fixture.mode === 'playing') {
+      await evaluate(cdp, `document.querySelector('.table-talk__trigger')?.click()`)
+      await waitForExpression(cdp, `Boolean(document.querySelector('.table-talk__drawer:not([hidden])'))`)
+      chatOpen = {
+        portrait: await capture(cdp, 'fixture-playing-chat-open-mobile', 390, 844),
+        landscape: await capture(cdp, 'fixture-playing-chat-open-landscape', 844, 390),
+        desktop: await capture(cdp, 'fixture-playing-chat-open-desktop', 1366, 768),
+      }
+    }
+    fixtureResults[fixture.mode] = { portrait, landscape, desktop, chatOpen }
     for (const result of [portrait, landscape, desktop].filter(Boolean)) {
       assert(!result.pageOverflowX, `${fixture.mode} fixture has horizontal overflow at ${result.viewport.join('x')}.`)
       assert(result.touchViolations.length === 0, `${fixture.mode} fixture has touch targets under 44px at ${result.viewport.join('x')}: ${JSON.stringify(result.touchViolations)}`)
       assert(result.unnamedControls.length === 0, `${fixture.mode} fixture has unnamed controls at ${result.viewport.join('x')}.`)
       assert(result.duplicateIds.length === 0, `${fixture.mode} fixture has duplicate IDs at ${result.viewport.join('x')}.`)
+    }
+    if (chatOpen) {
+      for (const result of Object.values(chatOpen)) {
+        assert(result.tableTalkDrawerVisible, `Table Talk did not open at ${result.viewport.join('x')}.`)
+        assert(result.tableTalkDrawerFullyVisible, `Table Talk was clipped at ${result.viewport.join('x')}.`)
+        assert(result.tableTalkComposerVisible, `Table Talk composer was not visible at ${result.viewport.join('x')}.`)
+        assert(result.tableTalkComposerFullyVisible, `Table Talk composer was partially clipped at ${result.viewport.join('x')}.`)
+        assert(result.tableTalkTextareaFullyVisible, `Table Talk textarea was clipped at ${result.viewport.join('x')}.`)
+        assert(result.tableTalkSendFullyVisible, `Table Talk send button was clipped at ${result.viewport.join('x')}.`)
+        assert(!result.pageOverflowX, `Open Table Talk caused horizontal overflow at ${result.viewport.join('x')}.`)
+        assert(result.touchViolations.length === 0, `Open Table Talk has touch targets under 44px at ${result.viewport.join('x')}: ${JSON.stringify(result.touchViolations)}`)
+        assert(result.unnamedControls.length === 0, `Open Table Talk has unnamed controls at ${result.viewport.join('x')}.`)
+      }
+      assert(!chatOpen.landscape.tableTalkOverlapsCurrentTrick, 'Landscape Table Talk covers the current trick.')
     }
   }
   assert(fixtureResults.resolving.portrait.lastCardVisible, 'The resolving fixture does not identify the THULLA card.')
@@ -329,6 +403,9 @@ try {
   assert(fixtureResults.resolving.desktop.lastCardVisible, 'The desktop resolving fixture does not visibly render the THULLA card.')
   assert(fixtureResults.resolving.desktop.thullaStatusVisible, 'The desktop resolving fixture does not show the THULLA announcement.')
   assert(!fixtureResults.resolving.desktop.thullaStatusOverlapsLastCard, 'The desktop THULLA announcement covers the final card.')
+  assert(!fixtureResults.resolving.portrait.tableTalkTriggerVisible, 'Table Talk remains available over the portrait THULLA reveal.')
+  assert(!fixtureResults.resolving.landscape.tableTalkTriggerVisible, 'Table Talk remains available over the landscape THULLA reveal.')
+  assert(!fixtureResults.finished.portrait.tableTalkTriggerVisible, 'Table Talk remains interactive outside the finished-round modal.')
   assert(!fixtureResults.resolving.portrait.clockVisible, 'The resolving fixture displays a running timer.')
   assert(!fixtureResults.reconnect.portrait.clockVisible, 'The reconnect fixture displays a running timer.')
 
@@ -388,8 +465,11 @@ try {
 
   await evaluate(cdp, `document.querySelector('.game-card--selectable:not(:disabled)')?.click()`)
   await waitForExpression(cdp, `Boolean(document.querySelector('.game-card.is-selected, .game-card[aria-pressed="true"]'))`)
+  await waitForExpression(cdp, `Boolean(document.querySelector('.table-talk__trigger'))`)
+  await evaluate(cdp, `document.querySelector('.table-talk__trigger')?.click()`)
+  await waitForExpression(cdp, `Boolean(document.querySelector('.table-talk__drawer:not([hidden])'))`)
   const resolvingStatePromise = waitForState(host, latestStates, (state) => state.game?.phase === 'resolving')
-  await evaluate(cdp, `document.querySelector('.game-v2-button--primary:not(:disabled)')?.click()`)
+  await evaluate(cdp, `[...document.querySelectorAll('.game-v2-button--primary:not(:disabled)')].find((button) => !button.closest('.table-talk'))?.click()`)
   const resolvingState = await resolvingStatePromise
   const resolutionObservedAt = Date.now()
 
@@ -398,11 +478,17 @@ try {
   assert(Boolean(resolvingState.game?.resolvedTrick), 'The server omitted the completed trick during resolution.')
   assert((resolvingState.game?.resolutionEndsAt ?? 0) - resolutionObservedAt >= 2_000, 'The completed trick was not retained long enough for players to read it.')
 
-  await waitForExpression(cdp, `Boolean(document.querySelector('.game-v2-resolution') && document.querySelector('.game-v2-trick-card.is-last-played'))`)
-  const resolutionResults = []
-  for (const viewport of VIEWPORTS) {
-    resolutionResults.push(await capture(cdp, `resolution-${viewport.name}`, viewport.width, viewport.height))
-  }
+  await waitForExpression(cdp, `Boolean(document.querySelector('.game-v2-resolution') && document.querySelector('.game-v2-trick-card.is-last-played')) && !document.querySelector('.table-talk__trigger') && !document.querySelector('.table-talk__drawer:not([hidden])')`)
+  await emitAck(host, 'room:react', { reaction: 'thulla' })
+  await delay(200)
+  const resolvingOverlayState = await evaluate(cdp, `({ tableTalk: Boolean(document.querySelector('.table-talk__drawer:not([hidden])')), reaction: Boolean(document.querySelector('.game-v2-live-reaction')) })`)
+  assert(!resolvingOverlayState.tableTalk, 'Table Talk stayed open over a real completed-trick reveal.')
+  assert(!resolvingOverlayState.reaction, 'A live reaction covered a real completed-trick reveal.')
+  // The real server retains a resolved trick for only three seconds. Capture one
+  // integrated viewport here; the deterministic fixtures above cover every
+  // responsive viewport without racing that intentional server deadline.
+  const integrationViewport = VIEWPORTS[0]
+  const resolutionResults = [await capture(cdp, `resolution-${integrationViewport.name}`, integrationViewport.width, integrationViewport.height)]
   for (const result of resolutionResults) {
     assert(result.visibleTrickCards === room.players.length, `${result.viewport.join('x')} did not show all completed trick cards.`)
     assert(result.lastCardVisible, `${result.viewport.join('x')} did not identify the final card.`)
@@ -460,6 +546,7 @@ try {
       clearedAt,
       deadlineDrift,
       serverPaused: resolvingState.game?.currentTurnId === null && resolvingState.game?.turnEndsAt === null,
+      overlaysHidden: !resolvingOverlayState.tableTalk && !resolvingOverlayState.reaction,
       results: resolutionResults,
     },
     nextTrick: cleared,
@@ -474,7 +561,10 @@ try {
 } finally {
   for (const socket of sockets) socket.disconnect()
   if (cdp) {
-    await cdp.send('Browser.close').catch(() => undefined)
+    await Promise.race([
+      cdp.send('Browser.close').catch(() => undefined),
+      delay(1_000),
+    ])
     cdp.close()
   }
   if (chrome && !chrome.killed) {

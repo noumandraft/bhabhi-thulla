@@ -7,6 +7,8 @@ import { Server, type Socket } from 'socket.io'
 import {
   PROTOCOL_VERSION,
   type Ack,
+  type ChatHistory,
+  type ChatMessage,
   type ReactionEvent,
   type RoomCredentials,
   type RoomLeaveResult,
@@ -20,7 +22,7 @@ interface WindowCounter {
   resetsAt: number
 }
 
-class RateLimiter {
+export class RateLimiter {
   private readonly counters = new Map<string, WindowCounter>()
 
   consume(key: string, limit: number, windowMs: number): boolean {
@@ -137,6 +139,22 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
     }
   }
 
+  function broadcastChat(room: Room, message: ChatMessage): void {
+    for (const player of room.players) {
+      if (!player.isBot && player.connected && player.socketId) {
+        io.to(player.socketId).emit('room:chat:message', message)
+      }
+    }
+  }
+
+  function broadcastReaction(room: Room, reaction: ReactionEvent): void {
+    for (const player of room.players) {
+      if (!player.isBot && player.connected && player.socketId) {
+        io.to(player.socketId).emit('room:reaction', reaction)
+      }
+    }
+  }
+
   manager.setPublisher(broadcast)
 
   function safeAck<T>(
@@ -178,7 +196,10 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
   io.on('connection', (socket) => {
     const ip = clientIp(socket)
     const usesReadyProtocol = socket.handshake.auth?.protocolVersion === PROTOCOL_VERSION
-    socket.emit('server:hello', { protocolVersion: PROTOCOL_VERSION } satisfies ServerHello)
+    socket.emit('server:hello', {
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: ['chat-v1'],
+    } satisfies ServerHello)
     const connectionCount = (connectionsByIp.get(ip) ?? 0) + 1
     connectionsByIp.set(ip, connectionCount)
     if (connectionCount > 12) {
@@ -258,7 +279,7 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
     socket.on('room:settings', (raw: unknown, ack?: (value: Ack) => void) => {
       safeAck(socket, 'room:settings', ack, () => {
         const seat = requireSeat(socket)
-        const payload = recordPayload(raw, ['turnSeconds', 'allowBots', 'reactionsEnabled', 'tutorialHints'])
+        const payload = recordPayload(raw, ['turnSeconds', 'allowBots', 'reactionsEnabled', 'tutorialHints', 'chatMode'])
         manager.updateSettings(seat.roomCode, seat.playerId, payload)
       })
     })
@@ -306,12 +327,44 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
 
     socket.on('room:react', (raw: unknown, ack?: (value: Ack<ReactionEvent>) => void) => {
       safeAck(socket, 'room:react', ack, () => {
-        if (!limiter.consume(`socket:${socket.id}:reaction`, 6, 10_000)) throw new Error('Please wait before sending another reaction.')
         const seat = requireSeat(socket)
+        if (!limiter.consume(`seat:${seat.roomCode}:${seat.playerId}:reaction`, 6, 10_000)) {
+          throw new Error('Please wait before sending another reaction.')
+        }
         const payload = recordPayload(raw, ['reaction'])
         const reaction = manager.createReaction(seat.roomCode, seat.playerId, textField(payload, 'reaction', 24))
-        io.to(seat.roomCode).emit('room:reaction', reaction)
+        broadcastReaction(manager.rooms.get(seat.roomCode)!, reaction)
         return reaction
+      })
+    })
+
+    socket.on('room:chat:history', (raw: unknown, ack?: (value: Ack<ChatHistory>) => void) => {
+      safeAck(socket, 'room:chat:history', ack, () => {
+        recordPayload(raw)
+        const seat = requireSeat(socket)
+        return manager.chatHistory(seat.roomCode, seat.playerId)
+      })
+    })
+
+    socket.on('room:chat:send', (raw: unknown, ack?: (value: Ack<ChatMessage>) => void) => {
+      safeAck(socket, 'room:chat:send', ack, () => {
+        const seat = requireSeat(socket)
+        const payload = recordPayload(raw, ['clientMessageId', 'text'])
+        const limiterKey = `seat:${seat.roomCode}:${seat.playerId}:chat`
+        const result = manager.createChatMessage(
+          seat.roomCode,
+          seat.playerId,
+          textField(payload, 'clientMessageId', 64),
+          textField(payload, 'text', 1_000),
+          () => {
+            if (!limiter.consume(`${limiterKey}:burst`, 5, 10_000)
+              || !limiter.consume(`${limiterKey}:minute`, 25, 60_000)) {
+              throw new Error('Please wait before sending another message.')
+            }
+          },
+        )
+        if (result.created) broadcastChat(manager.rooms.get(seat.roomCode)!, result.message)
+        return result.message
       })
     })
 

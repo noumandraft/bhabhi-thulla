@@ -32,6 +32,10 @@ function rightOf(room: Room, playerId: string) {
   throw new Error('No right-hand player')
 }
 
+function chatClientId(index: number): string {
+  return `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`
+}
+
 beforeEach(() => {
   vi.useFakeTimers()
   vi.setSystemTime(new Date('2026-07-27T12:00:00.000Z'))
@@ -410,5 +414,145 @@ describe('lobby, bots, reconnection and sessions', () => {
     const event = manager.createReaction(room.code, credentials[1].playerId, 'wah')
     expect(event).toMatchObject({ playerId: credentials[1].playerId, reaction: 'wah', createdAt: Date.now() })
     expect(() => manager.createReaction(room.code, credentials[1].playerId, 'anything')).toThrow('available reaction')
+  })
+})
+
+describe('Table Talk chat', () => {
+  it('normalizes text, authors identity on the server, and deduplicates client retries', () => {
+    const { manager, room, credentials } = setupLobby(2)
+    const first = manager.createChatMessage(
+      room.code,
+      credentials[1].playerId,
+      chatClientId(1),
+      '  Ｈello\r\nدنیا  ',
+    )
+    expect(first).toMatchObject({
+      created: true,
+      message: {
+        clientMessageId: chatClientId(1),
+        sequence: 1,
+        playerId: credentials[1].playerId,
+        playerName: 'Player 1',
+        text: 'Hello\nدنیا',
+        createdAt: Date.now(),
+      },
+    })
+    expect(first.message.id).toMatch(/^[0-9a-f-]{36}$/)
+
+    const retry = manager.createChatMessage(
+      room.code,
+      credentials[1].playerId,
+      chatClientId(1).toUpperCase(),
+      'Hello\nدنیا',
+      () => { throw new Error('A retry must not consume its rate limit.') },
+    )
+    expect(retry).toEqual({ created: false, message: first.message })
+    expect(manager.chatHistory(room.code, credentials[0].playerId).messages).toEqual([first.message])
+    expect(() => manager.createChatMessage(
+      room.code,
+      credentials[1].playerId,
+      chatClientId(1),
+      'Changed retry text',
+    )).toThrow('already been used')
+  })
+
+  it('rejects unsafe or oversized text, non-UUID ids, bots, and non-text modes', () => {
+    const { manager, room, credentials } = setupLobby(2)
+    const send = (index: number, text: unknown, clientId: unknown = chatClientId(index)) =>
+      manager.createChatMessage(room.code, credentials[1].playerId, clientId, text)
+
+    expect(() => send(1, '   ')).toThrow('Enter a chat message')
+    expect(() => send(2, 'one\ntwo\nthree\nfour')).toThrow('at most 3 lines')
+    expect(() => send(3, '🙂'.repeat(201))).toThrow('at most 200 characters')
+    expect(() => send(4, 'hello\tworld')).toThrow('unsupported characters')
+    expect(() => send(5, 'safe\u202etext')).toThrow('unsupported characters')
+    expect(() => send(6, 'hello', 'not-a-uuid')).toThrow('Invalid chat message id')
+
+    const bot = manager.addBot(room.code, credentials[0].playerId)
+    expect(() => manager.createChatMessage(room.code, bot.id, chatClientId(7), 'Bot text')).toThrow('Bots cannot')
+    manager.updateSettings(room.code, credentials[0].playerId, { chatMode: 'quick' })
+    expect(() => send(8, 'Text while quick chat is selected')).toThrow('not available')
+    manager.updateSettings(room.code, credentials[0].playerId, { chatMode: 'off' })
+    expect(() => send(9, 'Text while chat is off')).toThrow('not available')
+    expect(() => manager.updateSettings(room.code, credentials[0].playerId, { chatMode: 'unknown' })).toThrow('text, quick, or off')
+  })
+
+  it('allows reactions in text and quick modes but rejects them when chat is off', () => {
+    const { manager, room, credentials } = setupLobby(2)
+    expect(manager.createReaction(room.code, credentials[1].playerId, 'wah')).toMatchObject({ reaction: 'wah' })
+    manager.updateSettings(room.code, credentials[0].playerId, { chatMode: 'quick' })
+    expect(manager.createReaction(room.code, credentials[1].playerId, 'oye')).toMatchObject({ reaction: 'oye' })
+    manager.updateSettings(room.code, credentials[0].playerId, { reactionsEnabled: false })
+    expect(() => manager.createReaction(room.code, credentials[1].playerId, 'oye')).toThrow('Reactions are disabled')
+    manager.updateSettings(room.code, credentials[0].playerId, { reactionsEnabled: true })
+    manager.updateSettings(room.code, credentials[0].playerId, { chatMode: 'off' })
+    expect(() => manager.createReaction(room.code, credentials[1].playerId, 'chalo')).toThrow('Chat is disabled')
+  })
+
+  it('lets the host emergency-change only chat mode during an active match', () => {
+    const { manager, room, credentials } = setupLobby(3)
+    manager.updateSettings(room.code, credentials[0].playerId, { reactionsEnabled: false })
+    readyEveryone(manager, room)
+    manager.startGame(room.code, credentials[0].playerId)
+    const originalTurnSeconds = room.settings.turnSeconds
+    manager.updateSettings(room.code, credentials[0].playerId, { chatMode: 'quick' })
+    expect(room.settings).toMatchObject({ chatMode: 'quick', reactionsEnabled: true })
+    expect(manager.createReaction(room.code, credentials[1].playerId, 'wah')).toMatchObject({ reaction: 'wah' })
+    manager.updateSettings(room.code, credentials[0].playerId, { chatMode: 'off' })
+    expect(room.settings.chatMode).toBe('off')
+    expect(() => manager.createReaction(room.code, credentials[1].playerId, 'wah')).toThrow('Chat is disabled')
+
+    expect(() => manager.updateSettings(room.code, credentials[0].playerId, { turnSeconds: 20 })).toThrow('Only chat mode')
+    expect(() => manager.updateSettings(room.code, credentials[0].playerId, {
+      chatMode: 'text', reactionsEnabled: false,
+    })).toThrow('Only chat mode')
+    expect(room.settings).toMatchObject({ chatMode: 'off', turnSeconds: originalTurnSeconds, reactionsEnabled: true })
+    expect(() => manager.updateSettings(room.code, credentials[1].playerId, { chatMode: 'text' })).toThrow('Only the room host')
+  })
+
+  it('keeps only the latest 50 messages and clears ephemeral history with the room', () => {
+    const { manager, room, credentials } = setupLobby(1)
+    let firstMessage: ReturnType<GameManager['createChatMessage']>['message'] | undefined
+    for (let index = 1; index <= 55; index += 1) {
+      const result = manager.createChatMessage(room.code, credentials[0].playerId, chatClientId(index), `Message ${index}`)
+      if (index === 1) firstMessage = result.message
+    }
+    const history = manager.chatHistory(room.code, credentials[0].playerId).messages
+    expect(history).toHaveLength(50)
+    expect(history[0]).toMatchObject({ sequence: 6, text: 'Message 6' })
+    expect(history.at(-1)).toMatchObject({ sequence: 55, text: 'Message 55' })
+    const retry = manager.createChatMessage(
+      room.code,
+      credentials[0].playerId,
+      chatClientId(1),
+      'Message 1',
+      () => { throw new Error('An evicted retry must not consume its rate limit.') },
+    )
+    expect(retry).toEqual({ created: false, message: firstMessage })
+    expect(manager.chatHistory(room.code, credentials[0].playerId).messages).toHaveLength(50)
+
+    manager.leaveRoom(room.code, credentials[0].playerId, 'socket-0')
+    expect(manager.rooms.has(room.code)).toBe(false)
+    const chatRooms = (manager as unknown as { chatRooms: Map<string, unknown> }).chatRooms
+    expect(chatRooms.has(room.code)).toBe(false)
+  })
+
+  it('bounds retry metadata and expires deduplication after ten minutes', () => {
+    const { manager, room, credentials } = setupLobby(1)
+    for (let index = 1; index <= 300; index += 1) {
+      manager.createChatMessage(room.code, credentials[0].playerId, chatClientId(index), `Bounded ${index}`)
+    }
+    const chatRooms = (manager as unknown as {
+      chatRooms: Map<string, { dedupe: Map<string, unknown> }>
+    }).chatRooms
+    expect(chatRooms.get(room.code)?.dedupe.size).toBe(256)
+
+    const clientMessageId = chatClientId(1_000)
+    const first = manager.createChatMessage(room.code, credentials[0].playerId, clientMessageId, 'Expires later')
+    vi.advanceTimersByTime(10 * 60 * 1000 + 1)
+    const afterExpiry = manager.createChatMessage(room.code, credentials[0].playerId, clientMessageId, 'Expires later')
+    expect(afterExpiry).toMatchObject({ created: true, message: { sequence: first.message.sequence + 1 } })
+    expect(afterExpiry.message.id).not.toBe(first.message.id)
+    expect(afterExpiry.message.epoch).toBe(first.message.epoch)
   })
 })

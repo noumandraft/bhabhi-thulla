@@ -16,7 +16,7 @@ function base(): ClientRoomView {
   return {
     protocolVersion: PROTOCOL_VERSION,
     code: 'QA123', status: 'playing', players: players.map((player) => ({ ...player })), yourPlayerId: 'p1', canStart: false, startBlockReason: 'Match in progress.', minPlayers: 3, maxPlayers: 8,
-    settings: { turnSeconds: 35, reconnectGraceSeconds: 60, allowBots: true, reactionsEnabled: true, tutorialHints: true },
+    settings: { turnSeconds: 35, reconnectGraceSeconds: 60, allowBots: true, reactionsEnabled: true, tutorialHints: true, chatMode: 'text' },
     session: { roundNumber: 3, scores: [
       { playerId: 'p1', playerName: 'Hamza', roundsPlayed: 3, escapes: 2, firstEscapes: 1, bhabhiCount: 1, currentBhabhiStreak: 1, bestBhabhiStreak: 1 },
       { playerId: 'p2', playerName: 'Ayesha', roundsPlayed: 3, escapes: 3, firstEscapes: 2, bhabhiCount: 0, currentBhabhiStreak: 0, bestBhabhiStreak: 0 },

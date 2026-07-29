@@ -11,10 +11,10 @@
     "build:client": "tsc -b && vite build",
     "build:server": "tsc -p tsconfig.server.json",
     "start": "node dist-server/server/index.js",
-    "test": "vitest run server",
+    "test": "vitest run server src",
     "qa:platform": "node scripts/platform-qa.mjs",
     "qa:visual": "node scripts/visual-qa.mjs",
-    "test:watch": "vitest server"
+    "test:watch": "vitest server src"
   },
   "engines": {
     "node": ">=20"

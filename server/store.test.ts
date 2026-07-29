@@ -38,6 +38,38 @@ describe('room persistence', () => {
     expect(serialized).toContain('tokenHash')
   })
 
+  it('keeps Table Talk message content outside persisted room snapshots', () => {
+    const store = new CaptureStore()
+    const manager = new GameManager(store)
+    const created = manager.createRoom('Chat Host', 'chat-socket')
+    manager.createChatMessage(
+      created.room.code,
+      created.credentials.playerId,
+      '00000000-0000-4000-8000-000000000001',
+      'This private message must stay ephemeral.',
+    )
+    const serialized = JSON.stringify(persistenceSnapshot(created.room))
+    expect(serialized).not.toContain('This private message must stay ephemeral.')
+    expect(serialized).not.toContain('clientMessageId')
+  })
+
+  it('starts a fresh empty chat epoch when a persisted room is restored', async () => {
+    const first = new GameManager(new CaptureStore())
+    const created = first.createRoom('Chat Host', 'chat-socket')
+    const sent = first.createChatMessage(
+      created.room.code,
+      created.credentials.playerId,
+      '00000000-0000-4000-8000-000000000001',
+      'Ephemeral before restart',
+    )
+    const restored = JSON.parse(JSON.stringify(persistenceSnapshot(created.room))) as Room
+    const second = new GameManager(new CaptureStore([restored]))
+    await second.initialize()
+    const history = second.chatHistory(created.room.code, created.credentials.playerId)
+    expect(history.messages).toEqual([])
+    expect(history.epoch).not.toBe(sent.message.epoch)
+  })
+
   it('normalizes restored seats without a capability flag as legacy-compatible', async () => {
     const first = new GameManager(new CaptureStore())
     const created = first.createRoom('Old Player', 'old-socket')

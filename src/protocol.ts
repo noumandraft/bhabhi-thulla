@@ -21,8 +21,9 @@ export const DEFAULT_ROOM_SETTINGS: ClientRoomSettings = {
   allowBots: true,
   reactionsEnabled: true,
   tutorialHints: true,
+  chatMode: 'text',
 }
 
 export function roomSettings(room: ClientRoomView): ClientRoomSettings {
-  return room.settings ?? DEFAULT_ROOM_SETTINGS
+  return { ...DEFAULT_ROOM_SETTINGS, ...room.settings }
 }

@@ -4,6 +4,9 @@ export const TURN_SECONDS = [20, 35, 60] as const
 export const TRICK_RESOLUTION_MS = 3_000
 export const RECONNECT_GRACE_MS = 60_000
 export const PROTOCOL_VERSION = '2.0.0'
+export const CHAT_MODES = ['text', 'quick', 'off'] as const
+export const CHAT_MAX_CODE_POINTS = 200
+export const CHAT_HISTORY_LIMIT = 50
 
 export const REACTIONS = ['thulla', 'wah', 'oye', 'chalo', 'bach-gaya', 'good-move'] as const
 
@@ -11,6 +14,8 @@ export type Suit = (typeof SUITS)[number]
 export type Rank = (typeof RANKS)[number]
 export type TurnSeconds = (typeof TURN_SECONDS)[number]
 export type Reaction = (typeof REACTIONS)[number]
+export type ChatMode = (typeof CHAT_MODES)[number]
+export type ServerCapability = 'chat-v1'
 export type GamePhase = 'turn' | 'resolving' | 'waiting_for_reconnect'
 
 export interface Card {
@@ -61,6 +66,7 @@ export interface RoomSettings {
   allowBots: boolean
   reactionsEnabled: boolean
   tutorialHints: boolean
+  chatMode: ChatMode
 }
 
 export interface SessionScore {
@@ -85,6 +91,22 @@ export interface ReactionEvent {
   playerName: string
   reaction: Reaction
   createdAt: number
+}
+
+export interface ChatMessage {
+  id: string
+  epoch: string
+  clientMessageId: string
+  sequence: number
+  playerId: string
+  playerName: string
+  text: string
+  createdAt: number
+}
+
+export interface ChatHistory {
+  epoch: string
+  messages: ChatMessage[]
 }
 
 export interface RoomView {
@@ -136,6 +158,7 @@ export interface RoomLeaveResult {
 
 export interface ServerHello {
   protocolVersion: typeof PROTOCOL_VERSION
+  capabilities?: ServerCapability[]
 }
 
 export interface Ack<T = undefined> {

@@ -20,8 +20,9 @@ A mobile-first, real-time multiplayer version of the Pakistani/Punjabi card game
 - Host option to replace an unavailable player with a bot
 - Ready states, host removal controls, bots and 20/35/60-second turn settings
 - Session scoreboard, rematch readiness and score reset
-- Preset table reactions without public or free-text chat
-- Optional turn sound, vibration, hidden-tab title alert and reaction mute
+- Private-room Table Talk with server-checked text chat and preset quick reactions
+- Host-selectable text + quick, quick-only and off modes; per-player local mute and unread controls
+- Optional turn sound, vibration, hidden-tab title alert, reaction mute and chat-notification mute
 - English, Roman Urdu and Urdu interface options
 - Interactive tutorial, illustrated rules and contextual “What happened?” explanations
 - Responsive phone portrait, phone landscape, tablet and desktop table layouts
@@ -60,6 +61,7 @@ With `npm run dev` already running, `npm run qa:visual` creates a real eight-pla
 - Completed-card visibility and final-card emphasis
 - Paused timer during resolution and a fresh timer afterward
 - Desktop 1440×900, mobile 375×812 and landscape 844×390 gameplay
+- Open Table Talk drawer/sheet layout on desktop, phone portrait and phone landscape
 - Horizontal overflow, 44px touch targets, accessible names, duplicate IDs, display-card semantics, reduced motion and console errors
 
 Screenshots and `visual-qa-report.json` are written to `design/qa/`.
@@ -90,6 +92,8 @@ Keep secrets in Render or local ignored `.env` files. Never expose `REDIS_URL` t
 Without `REDIS_URL`, the server deliberately uses in-memory room storage. That is convenient locally, but a restart deletes every active room and the process cannot safely scale to multiple instances.
 
 With `REDIS_URL`, room mutations are stored with an abandonment TTL. Socket IDs are never persisted. Restored rooms remain suspended until a player reconnects, then absolute trick/reconnect deadlines are reconciled rather than silently granting a fresh timer.
+
+Table Talk is intentionally ephemeral. The server keeps only the latest 50 messages for the active room, limits text to 200 Unicode code points and three lines, rate-limits each seat, and never writes chat content to Redis. Chat disappears when the room closes or the server process restarts.
 
 Storage durability depends on the provider. Render's free Key Value service is in-memory and loses data when it restarts, and a free web service has an ephemeral filesystem. To make matches survive infrastructure restarts, use a persistent paid Key Value service or another durable Redis-compatible provider. Do not use the Render filesystem for match persistence.
 
@@ -174,5 +178,5 @@ The specification permits coarse funnel events such as landing viewed, room ente
 - Free Render services may sleep when idle; the landing page can briefly show **Waking up server…**.
 - Memory-only rooms disappear on server restart.
 - Render Free Key Value is not durable across its own restart.
-- The app has no accounts, global rankings, public matchmaking, public chat or paid currency.
+- The app has no accounts, global rankings, public matchmaking, public/global chat or paid currency. Text chat is limited to players currently seated in the same private room.
 - Horizontal scaling requires shared room storage plus a Socket.IO scaling/sticky-session strategy.

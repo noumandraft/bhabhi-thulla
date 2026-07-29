@@ -229,6 +229,36 @@ const en = {
   reactionChalo: 'Chalo!',
   reactionBachGaya: 'Bach gaya!',
   reactionGoodMove: 'Good move!',
+  tableTalk: 'Table talk',
+  chatMode: 'Table talk',
+  chatTextAndQuick: 'Text + quick chat',
+  chatQuickOnly: 'Quick chat only',
+  chatOff: 'Off',
+  quickReactions: 'Quick reactions',
+  textChat: 'Text chat',
+  quickReactionHint: 'Send a quick table reaction.',
+  noChatMessages: 'No messages yet. Start the table talk.',
+  chatMessageList: 'Table talk messages',
+  newMessages: 'New messages',
+  returnToCards: 'Return to cards',
+  chatMessageLabel: 'Message everyone at this table',
+  chatPlaceholder: 'Type a message…',
+  sendMessage: 'Send message',
+  sendingMessage: 'Sending…',
+  chatSendFailed: 'Message could not be sent. Please try again.',
+  charactersRemaining: '{{count}} characters remaining',
+  chatPrivacy: 'Chat disappears when this room closes.',
+  chatPlayerControls: 'Player chat controls',
+  mute: 'Mute',
+  unmute: 'Unmute',
+  mutePlayer: 'Mute {{name}}',
+  unmutePlayer: 'Unmute {{name}}',
+  mutedCount: '{{count}} muted',
+  openTableTalk: 'Open table talk',
+  openTableTalkUnread: 'Open table talk, {{count}} unread message(s)',
+  closeTableTalk: 'Close table talk',
+  muteChatNotifications: 'Mute chat notifications',
+  chatModeUpdateFailed: 'Could not update table talk.',
 } as const
 
 type TranslationKey = keyof typeof en
@@ -255,6 +285,7 @@ const roman: Partial<Record<TranslationKey, string>> = {
   cardTable: 'Tash ki table', otherPlayers: 'Doosray khilari', connectedServer: 'Game server se jura hua', reconnectingServer: 'Game server se dobara jur raha hai', copyRoomCode: 'Room code {{code}} copy karein', cardsInWaste: 'Waste mein {{count}} patte', currentTrickLabel: 'Abhi ki trick', completedTrickLabel: 'Pichli mukammal trick', cardName: '{{suit}} ka {{rank}}',
   nextRightSuffix: 'dayein taraf agla khilari', currentTurnSuffix: 'abhi ki bari', suitSpades: 'Hukam', suitHearts: 'Paan', suitDiamonds: 'Eent', suitClubs: 'Chiri', youAreBhabhi: 'Aaj aap Bhabhi hain!', playerIsBhabhi: '{{name}} Bhabhi hai!', roundResultAnnouncement: 'Round khatam. {{result}}', tutorialProgress: 'Qadam {{step}}, kul {{count}}', leadLabel: 'CHAAL', powerLabel: 'POWER',
   selectedCardLabel: '{{card}}, chuna gaya', documentTitle: 'Bhabhi Thulla — Pakistani online card game', cardPlayFailed: 'Yeh patta nahi chal saka.', takeFailed: 'Dayein khilari ke patte nahi liye ja sake.', takeSuccess: '{{name}} bach gaya. Us ke patte ab aap ke haath mein hain.', roomCodeCopied: 'Room code copy ho gaya', reactionFailed: 'Jumla nahi bheja ja saka.', roundUpdateFailed: 'Round update nahi ho saka.', ledSuit: 'chala hua suit', playedCard: '{{name}} ne {{card}} chala.', waitingAce: 'Hukam ke Ace ka intezar hai.', tableClear: 'Table saaf hai. Pehli chaal ka intezar hai.', directionDescription: 'Khel ghari ki ulti simt dayein taraf chalta hai', disconnectedPaused: '{{name}} ka rabta toot gaya. Bari ruki hui hai.', enterRoomFailed: 'Room mein dakhil nahi ho sake.', practiceCreated: 'Practice room ban gaya. Shuru karne ke liye patte baantain.', roomCreatedBots: 'Room ban gaya. Lobby se bots shamil karein.', inviteMessage: 'Mere Bhabhi Thulla room mein shamil hon: {{url}}', copyInviteRoom: 'Room {{code}} ka invite copy karein', seatsFilled: '{{total}} mein se {{count}} jaghain bhar gayi hain', removePlayerFailed: 'Khilari nahi hataya ja saka.', removeBotFailed: 'Bot nahi hataya ja saka.', addBotFailed: 'Bot shamil nahi ho saka.', settingsUpdateFailed: 'Settings update nahi ho sakeen.', readyUpdateFailed: 'Tayyari ka status update nahi ho saka.', startFailed: 'Match shuru nahi ho saka.', serverUpdating: 'Game server update ho raha hai. Zara der baad dobara koshish karein.', reactionThulla: 'THULLA!', reactionWah: 'Wah!', reactionOye: 'Oye!', reactionChalo: 'Chalo!', reactionBachGaya: 'Bach gaya!', reactionGoodMove: 'Achi chaal!',
+  tableTalk: 'Table ki baat', chatMode: 'Table ki baat', chatTextAndQuick: 'Text aur foran jumlay', chatQuickOnly: 'Sirf foran jumlay', chatOff: 'Band', quickReactions: 'Foran jumlay', textChat: 'Chat', quickReactionHint: 'Table par foran jumla bhejein.', noChatMessages: 'Abhi koi paigham nahi. Baat shuru karein.', chatMessageList: 'Table ke paighamat', newMessages: 'Naye paighamat', returnToCards: 'Patton par wapas jayein', chatMessageLabel: 'Is table par sab ko paigham', chatPlaceholder: 'Paigham likhein…', sendMessage: 'Paigham bhejein', sendingMessage: 'Bheja ja raha hai…', chatSendFailed: 'Paigham nahi bheja ja saka. Dobara koshish karein.', charactersRemaining: '{{count}} haroof baqi', chatPrivacy: 'Room band honay par chat bhi khatam ho jayegi.', chatPlayerControls: 'Khilari chat controls', mute: 'Band karein', unmute: 'Wapas sunain', mutePlayer: '{{name}} ko band karein', unmutePlayer: '{{name}} ko wapas sunain', mutedCount: '{{count}} band', openTableTalk: 'Table ki baat kholein', openTableTalkUnread: 'Table ki baat kholein, {{count}} naye paigham', closeTableTalk: 'Table ki baat band karein', muteChatNotifications: 'Chat notifications band karein', chatModeUpdateFailed: 'Table ki baat update nahi ho saki.',
 }
 
 const ur: Partial<Record<TranslationKey, string>> = {
@@ -280,6 +311,7 @@ const ur: Partial<Record<TranslationKey, string>> = {
   cardTable: 'تاش کی میز', otherPlayers: 'دوسرے کھلاڑی', connectedServer: 'گیم سرور سے منسلک', reconnectingServer: 'گیم سرور سے دوبارہ جڑ رہا ہے', copyRoomCode: 'کمرے کا کوڈ {{code}} کاپی کریں', cardsInWaste: 'ضائع ڈھیر میں {{count}} پتے', currentTrickLabel: 'موجودہ ٹرک', completedTrickLabel: 'پچھلی مکمل ٹرک', cardName: '{{suit}} کا {{rank}}', nextRightSuffix: 'دائیں طرف اگلا کھلاڑی', currentTurnSuffix: 'موجودہ باری', suitSpades: 'حکم', suitHearts: 'پان', suitDiamonds: 'اینٹ', suitClubs: 'چڑی',
   youAreBhabhi: 'آج آپ بھابھی ہیں!', playerIsBhabhi: '{{name}} بھابھی ہے!', roundResultAnnouncement: 'راؤنڈ ختم۔ {{result}}', tutorialProgress: 'قدم {{step}} از {{count}}', leadLabel: 'چال', powerLabel: 'پاور',
   selectedCardLabel: '{{card}}، منتخب', documentTitle: 'بھابھی تھلّا — پاکستانی آن لائن تاش', cardPlayFailed: 'یہ پتہ نہیں چل سکا۔', takeFailed: 'دائیں کھلاڑی کے پتے نہیں لیے جا سکے۔', takeSuccess: '{{name}} بچ گیا۔ اس کے پتے اب آپ کے ہاتھ میں ہیں۔', roomCodeCopied: 'کمرے کا کوڈ کاپی ہو گیا', reactionFailed: 'ردعمل نہیں بھیجا جا سکا۔', roundUpdateFailed: 'راؤنڈ اپ ڈیٹ نہیں ہو سکا۔', ledSuit: 'چلا ہوا سوٹ', playedCard: '{{name}} نے {{card}} چلا۔', waitingAce: 'حکم کے اکّے کا انتظار ہے۔', tableClear: 'میز صاف ہے۔ پہلی چال کا انتظار ہے۔', directionDescription: 'کھیل گھڑی کی الٹی سمت دائیں طرف چلتا ہے', disconnectedPaused: '{{name}} کا رابطہ ٹوٹ گیا۔ باری رکی ہوئی ہے۔', enterRoomFailed: 'کمرے میں داخل نہیں ہو سکے۔', practiceCreated: 'مشق کا کمرہ بن گیا۔ شروع کرنے کے لیے پتے بانٹیں۔', roomCreatedBots: 'کمرہ بن گیا۔ لابی سے بوٹس شامل کریں۔', inviteMessage: 'میرے بھابھی تھلّا کمرے میں شامل ہوں: {{url}}', copyInviteRoom: 'کمرے {{code}} کی دعوت کاپی کریں', seatsFilled: '{{total}} میں سے {{count}} جگہیں بھر گئی ہیں', removePlayerFailed: 'کھلاڑی نہیں ہٹایا جا سکا۔', removeBotFailed: 'بوٹ نہیں ہٹایا جا سکا۔', addBotFailed: 'بوٹ شامل نہیں ہو سکا۔', settingsUpdateFailed: 'ترتیبات اپ ڈیٹ نہیں ہو سکیں۔', readyUpdateFailed: 'تیاری کی حالت اپ ڈیٹ نہیں ہو سکی۔', startFailed: 'میچ شروع نہیں ہو سکا۔', serverUpdating: 'گیم سرور اپ ڈیٹ ہو رہا ہے۔ کچھ دیر بعد دوبارہ کوشش کریں۔', reactionThulla: 'تھلّا!', reactionWah: 'واہ!', reactionOye: 'اوئے!', reactionChalo: 'چلو!', reactionBachGaya: 'بچ گیا!', reactionGoodMove: 'اچھی چال!',
+  tableTalk: 'میز کی گفتگو', chatMode: 'میز کی گفتگو', chatTextAndQuick: 'تحریری اور فوری چیٹ', chatQuickOnly: 'صرف فوری ردعمل', chatOff: 'بند', quickReactions: 'فوری ردعمل', textChat: 'چیٹ', quickReactionHint: 'میز پر فوری ردعمل بھیجیں۔', noChatMessages: 'ابھی کوئی پیغام نہیں۔ گفتگو شروع کریں۔', chatMessageList: 'میز کی گفتگو کے پیغامات', newMessages: 'نئے پیغامات', returnToCards: 'پتوں پر واپس جائیں', chatMessageLabel: 'اس میز پر سب کو پیغام', chatPlaceholder: 'پیغام لکھیں…', sendMessage: 'پیغام بھیجیں', sendingMessage: 'بھیجا جا رہا ہے…', chatSendFailed: 'پیغام نہیں بھیجا جا سکا۔ دوبارہ کوشش کریں۔', charactersRemaining: '{{count}} حروف باقی', chatPrivacy: 'کمرہ بند ہونے پر گفتگو بھی ختم ہو جائے گی۔', chatPlayerControls: 'کھلاڑیوں کی چیٹ کنٹرول', mute: 'خاموش کریں', unmute: 'آواز بحال کریں', mutePlayer: '{{name}} کو خاموش کریں', unmutePlayer: '{{name}} کی آواز بحال کریں', mutedCount: '{{count}} خاموش', openTableTalk: 'میز کی گفتگو کھولیں', openTableTalkUnread: 'میز کی گفتگو کھولیں، {{count}} نئے پیغامات', closeTableTalk: 'میز کی گفتگو بند کریں', muteChatNotifications: 'چیٹ کے انتباہ خاموش کریں', chatModeUpdateFailed: 'میز کی گفتگو اپ ڈیٹ نہیں ہو سکی۔',
 }
 
 const dictionaries: Record<Language, Partial<Record<TranslationKey, string>>> = { en, roman, ur }

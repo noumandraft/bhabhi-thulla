@@ -1,5 +1,8 @@
 import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import {
+  CHAT_HISTORY_LIMIT,
+  CHAT_MAX_CODE_POINTS,
+  CHAT_MODES,
   PROTOCOL_VERSION,
   RANKS,
   REACTIONS,
@@ -11,6 +14,9 @@ import {
   sortCards,
   type ActivityItem,
   type Card,
+  type ChatHistory,
+  type ChatMessage,
+  type ChatMode,
   type GamePhase,
   type Reaction,
   type ReactionEvent,
@@ -26,6 +32,11 @@ import {
 
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const ROOM_TTL_MS = 6 * 60 * 60 * 1000
+const CHAT_DEDUPE_TTL_MS = 10 * 60 * 1000
+const CHAT_DEDUPE_LIMIT = 256
+const CLIENT_MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const CHAT_CONTROL_CHARACTER_PATTERN = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u
+const CHAT_BIDI_CONTROL_PATTERN = /[\u202a-\u202e\u2066-\u2069]/u
 
 export interface Player {
   id: string
@@ -113,6 +124,20 @@ export interface RoomPersistence {
   status(): PersistenceStatus
 }
 
+interface ChatRoomState {
+  epoch: string
+  nextSequence: number
+  messages: ChatMessage[]
+  dedupe: Map<string, ChatDedupeEntry>
+}
+
+type ChatDedupeEntry = Omit<ChatMessage, 'text'> & { textHash: string; expiresAt: number }
+
+export interface ChatMessageResult {
+  message: ChatMessage
+  created: boolean
+}
+
 class MemoryPersistence implements RoomPersistence {
   async initialize(): Promise<void> {}
   async loadAll(): Promise<Room[]> { return [] }
@@ -147,8 +172,48 @@ function cleanCode(value: unknown): string {
   return code
 }
 
+function cleanClientMessageId(value: unknown): string {
+  const id = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (!CLIENT_MESSAGE_ID_PATTERN.test(id)) throw new Error('Invalid chat message id.')
+  return id
+}
+
+function cleanChatText(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Enter a chat message.')
+  const normalized = value.normalize('NFKC').replace(/\r\n?|[\u2028\u2029]/g, '\n')
+  if (CHAT_CONTROL_CHARACTER_PATTERN.test(normalized) || CHAT_BIDI_CONTROL_PATTERN.test(normalized)) {
+    throw new Error('That message contains unsupported characters.')
+  }
+  const text = normalized.trim()
+  if (!text) throw new Error('Enter a chat message.')
+  if (text.split('\n').length > 3) throw new Error('Chat messages can use at most 3 lines.')
+  if ([...text].length > CHAT_MAX_CODE_POINTS) {
+    throw new Error(`Chat messages can use at most ${CHAT_MAX_CODE_POINTS} characters.`)
+  }
+  return text
+}
+
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
+}
+
+function hashChatText(text: string): string {
+  return createHash('sha256').update(text).digest('hex')
+}
+
+function chatDedupeKey(playerId: string, clientMessageId: string): string {
+  return `${playerId}:${clientMessageId}`
+}
+
+function pruneChatDedupe(chat: ChatRoomState, now: number): void {
+  for (const [key, entry] of chat.dedupe) {
+    if (entry.expiresAt <= now) chat.dedupe.delete(key)
+  }
+  while (chat.dedupe.size > CHAT_DEDUPE_LIMIT) {
+    const oldest = chat.dedupe.keys().next().value as string | undefined
+    if (!oldest) break
+    chat.dedupe.delete(oldest)
+  }
 }
 
 function tokenMatches(token: string, expectedHash: string): boolean {
@@ -204,6 +269,7 @@ function defaultSettings(): RoomSettings {
     allowBots: true,
     reactionsEnabled: true,
     tutorialHints: true,
+    chatMode: 'text',
   }
 }
 
@@ -223,6 +289,7 @@ function newScore(player: Player): SessionScore {
 export class GameManager {
   readonly rooms = new Map<string, Room>()
   private readonly timers = new Map<string, NodeJS.Timeout>()
+  private readonly chatRooms = new Map<string, ChatRoomState>()
   private publisher: (room: Room) => void = () => undefined
   private readonly persistence: RoomPersistence
 
@@ -492,12 +559,15 @@ export class GameManager {
 
   updateSettings(roomCode: string, playerId: string, patch: unknown): void {
     const room = this.requireRoom(roomCode)
-    const host = this.requireHost(room, playerId)
-    if (!host || room.status === 'playing') throw new Error('Settings can only be changed between rounds.')
+    this.requireHost(room, playerId)
     if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Invalid room settings.')
     const value = patch as Record<string, unknown>
-    const allowed = new Set(['turnSeconds', 'allowBots', 'reactionsEnabled', 'tutorialHints'])
-    if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error('Unknown room setting.')
+    const allowed = new Set(['turnSeconds', 'allowBots', 'reactionsEnabled', 'tutorialHints', 'chatMode'])
+    const keys = Object.keys(value)
+    if (keys.some((key) => !allowed.has(key))) throw new Error('Unknown room setting.')
+    if (room.status === 'playing' && (keys.length !== 1 || keys[0] !== 'chatMode')) {
+      throw new Error('Only chat mode can be changed during a match.')
+    }
     const nextSettings: RoomSettings = { ...room.settings }
     if (value.turnSeconds !== undefined) {
       if (!TURN_SECONDS.includes(value.turnSeconds as TurnSeconds)) throw new Error('Turn time must be 20, 35, or 60 seconds.')
@@ -508,6 +578,13 @@ export class GameManager {
         if (typeof value[key] !== 'boolean') throw new Error(`${key} must be true or false.`)
         nextSettings[key] = value[key] as boolean
       }
+    }
+    if (value.chatMode !== undefined) {
+      if (typeof value.chatMode !== 'string' || !CHAT_MODES.includes(value.chatMode as ChatMode)) {
+        throw new Error('chatMode must be text, quick, or off.')
+      }
+      nextSettings.chatMode = value.chatMode as ChatMode
+      if (nextSettings.chatMode === 'text' || nextSettings.chatMode === 'quick') nextSettings.reactionsEnabled = true
     }
     if (!nextSettings.allowBots && room.players.some((player) => player.isBot)) {
       throw new Error('Remove existing bots before disabling bots.')
@@ -602,6 +679,7 @@ export class GameManager {
 
   createReaction(roomCode: string, playerId: string, reactionValue: unknown): ReactionEvent {
     const room = this.requireRoom(roomCode)
+    if (room.settings.chatMode === 'off') throw new Error('Chat is disabled in this room.')
     if (!room.settings.reactionsEnabled) throw new Error('Reactions are disabled in this room.')
     const player = this.requirePlayer(room, playerId)
     if (typeof reactionValue !== 'string' || !REACTIONS.includes(reactionValue as Reaction)) {
@@ -614,6 +692,73 @@ export class GameManager {
       reaction: reactionValue as Reaction,
       createdAt: Date.now(),
     }
+  }
+
+  chatHistory(roomCode: string, playerId: string): ChatHistory {
+    const room = this.requireRoom(roomCode)
+    const player = this.requirePlayer(room, playerId)
+    if (player.isBot) throw new Error('Bots cannot use chat.')
+    const chat = this.ensureChatRoom(room.code)
+    pruneChatDedupe(chat, Date.now())
+    return { epoch: chat.epoch, messages: chat.messages.map((message) => ({ ...message })) }
+  }
+
+  createChatMessage(
+    roomCode: string,
+    playerId: string,
+    clientMessageIdValue: unknown,
+    textValue: unknown,
+    beforeCreate: () => void = () => undefined,
+  ): ChatMessageResult {
+    const room = this.requireRoom(roomCode)
+    const player = this.requirePlayer(room, playerId)
+    const clientMessageId = cleanClientMessageId(clientMessageIdValue)
+    const text = cleanChatText(textValue)
+    const now = Date.now()
+    const dedupeKey = chatDedupeKey(player.id, clientMessageId)
+    const currentChat = this.chatRooms.get(room.code)
+    if (currentChat) pruneChatDedupe(currentChat, now)
+    const existing = currentChat?.dedupe.get(dedupeKey)
+    if (existing) {
+      if (existing.textHash !== hashChatText(text)) throw new Error('That chat message id has already been used.')
+      const { textHash: _textHash, expiresAt: _expiresAt, ...message } = existing
+      return { message: { ...message, text }, created: false }
+    }
+    if (player.isBot) throw new Error('Bots cannot use chat.')
+    if (room.settings.chatMode !== 'text') throw new Error('Text chat is not available in this room.')
+
+    beforeCreate()
+    const chat = currentChat ?? this.ensureChatRoom(room.code)
+    const message: ChatMessage = {
+      id: randomUUID(),
+      epoch: chat.epoch,
+      clientMessageId,
+      sequence: chat.nextSequence,
+      playerId: player.id,
+      playerName: player.name,
+      text,
+      createdAt: now,
+    }
+    chat.nextSequence += 1
+    chat.messages.push(message)
+    if (chat.messages.length > CHAT_HISTORY_LIMIT) chat.messages.splice(0, chat.messages.length - CHAT_HISTORY_LIMIT)
+    const { text: _text, ...messageMetadata } = message
+    chat.dedupe.set(dedupeKey, {
+      ...messageMetadata,
+      textHash: hashChatText(text),
+      expiresAt: now + CHAT_DEDUPE_TTL_MS,
+    })
+    pruneChatDedupe(chat, now)
+    return { message: { ...message }, created: true }
+  }
+
+  private ensureChatRoom(roomCode: string): ChatRoomState {
+    let chat = this.chatRooms.get(roomCode)
+    if (!chat) {
+      chat = { epoch: randomUUID(), nextSequence: 1, messages: [], dedupe: new Map() }
+      this.chatRooms.set(roomCode, chat)
+    }
+    return chat
   }
 
   startGame(roomCode: string, playerId: string): void {
@@ -1086,6 +1231,7 @@ export class GameManager {
 
   private deleteRoom(room: Room): void {
     this.clearTimer(room.code)
+    this.chatRooms.delete(room.code)
     this.rooms.delete(room.code)
     void this.persistence.delete(room.code).catch((error) => console.error('room_store_delete_failed', { code: room.code, error: String(error) }))
   }

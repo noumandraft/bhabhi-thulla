@@ -4,6 +4,7 @@ export interface Preferences {
   sound: boolean
   haptics: boolean
   reactionsMuted: boolean
+  chatNotificationsMuted: boolean
   tutorialComplete: boolean
   scrollHintSeen: boolean
 }
@@ -14,6 +15,7 @@ const defaults: Preferences = {
   sound: true,
   haptics: true,
   reactionsMuted: false,
+  chatNotificationsMuted: false,
   tutorialComplete: false,
   scrollHintSeen: false,
 }
@@ -39,4 +41,3 @@ export function usePreferences() {
 
   return { preferences, updatePreference }
 }
-

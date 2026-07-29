@@ -1,7 +1,18 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { randomUUID } from 'node:crypto'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { io as connect, type Socket } from 'socket.io-client'
-import { PROTOCOL_VERSION, type Ack, type ReactionEvent, type RoomCredentials, type RoomLeaveResult, type RoomView, type ServerHello } from '../shared/game.js'
-import { createGameServer, type GameServer } from './index.js'
+import {
+  PROTOCOL_VERSION,
+  type Ack,
+  type ChatHistory,
+  type ChatMessage,
+  type ReactionEvent,
+  type RoomCredentials,
+  type RoomLeaveResult,
+  type RoomView,
+  type ServerHello,
+} from '../shared/game.js'
+import { createGameServer, RateLimiter, type GameServer } from './index.js'
 
 type ObservedSocket = Socket & { observedHello?: ServerHello }
 
@@ -55,7 +66,10 @@ describe('Socket.IO server protocol', () => {
     expect(await ready.json()).toMatchObject({ ok: true, persistence: { ready: true } })
 
     sockets.push(await connectedSocket(url), await connectedSocket(url), await connectedSocket(url))
-    expect((sockets[0] as ObservedSocket).observedHello).toEqual({ protocolVersion: PROTOCOL_VERSION })
+    expect((sockets[0] as ObservedSocket).observedHello).toEqual({
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: ['chat-v1'],
+    })
     const created = await emitAck<RoomCredentials>(sockets[0], 'room:create', { name: 'Host Player' })
     expect(created.ok).toBe(true)
     expect(await emitAck(sockets[0], 'room:create', { name: 'Duplicate Host' })).toMatchObject({
@@ -198,5 +212,171 @@ describe('Socket.IO server protocol', () => {
     expect((await emitAck(sockets[0], 'game:start', {})).ok).toBe(true)
     expect(room).toMatchObject({ status: 'playing', session: { roundNumber: 2 } })
     expect(credentials.map((credential) => credential.playerId)).toEqual([host.id, middle.id, right.id])
+  })
+
+  it('broadcasts deduplicated room-only chat and returns bounded seat history', async () => {
+    gameServer = await createGameServer({
+      ...process.env,
+      NODE_ENV: 'test',
+      CLIENT_ORIGIN: 'http://localhost:5173',
+      REDIS_URL: '',
+    })
+    const port = await gameServer.listen(0)
+    const url = `http://127.0.0.1:${port}`
+    sockets.push(
+      await connectedSocket(url),
+      await connectedSocket(url),
+      await connectedSocket(url),
+      await connectedSocket(url),
+    )
+    const created = await emitAck<RoomCredentials>(sockets[0], 'room:create', { name: 'Chat Host' })
+    const joined = await emitAck<RoomCredentials>(sockets[1], 'room:join', {
+      code: created.data!.code,
+      name: 'Chat Friend',
+    })
+    await emitAck<RoomCredentials>(sockets[2], 'room:create', { name: 'Other Room' })
+
+    const peerMessages: ChatMessage[] = []
+    const otherRoomMessages: ChatMessage[] = []
+    sockets[1].on('room:chat:message', (message: ChatMessage) => peerMessages.push(message))
+    sockets[2].on('room:chat:message', (message: ChatMessage) => otherRoomMessages.push(message))
+    const clientMessageId = randomUUID()
+    const sent = await emitAck<ChatMessage>(sockets[0], 'room:chat:send', {
+      clientMessageId,
+      text: '  Table talk\r\nٹھلا  ',
+    })
+    expect(sent).toMatchObject({
+      ok: true,
+      data: {
+        epoch: expect.any(String),
+        clientMessageId,
+        sequence: 1,
+        playerId: created.data!.playerId,
+        playerName: 'Chat Host',
+        text: 'Table talk\nٹھلا',
+      },
+    })
+    await new Promise((fulfill) => setTimeout(fulfill, 20))
+    expect(peerMessages).toEqual([sent.data])
+    expect(otherRoomMessages).toEqual([])
+
+    const retried = await emitAck<ChatMessage>(sockets[0], 'room:chat:send', {
+      clientMessageId,
+      text: 'Table talk\nٹھلا',
+    })
+    expect(retried).toEqual(sent)
+    await new Promise((fulfill) => setTimeout(fulfill, 20))
+    expect(peerMessages).toHaveLength(1)
+
+    const history = await emitAck<ChatHistory>(sockets[1], 'room:chat:history', {})
+    expect(history).toEqual({
+      ok: true,
+      data: { epoch: sent.data!.epoch, messages: [sent.data] },
+    })
+    expect(joined.data!.playerId).not.toBe(sent.data!.playerId)
+    expect(await emitAck(sockets[0], 'room:chat:send', {
+      clientMessageId: randomUUID(), text: 'Spoof', playerId: joined.data!.playerId,
+    })).toMatchObject({ ok: false, error: 'Invalid request fields.' })
+    expect(await emitAck(sockets[3], 'room:chat:send', {
+      clientMessageId: randomUUID(), text: 'Not seated',
+    })).toMatchObject({ ok: false, error: expect.stringContaining('Reconnect') })
+  })
+
+  it('keeps the per-seat chat burst limit across reconnects without charging deduplicated retries', async () => {
+    gameServer = await createGameServer({
+      ...process.env,
+      NODE_ENV: 'test',
+      CLIENT_ORIGIN: 'http://localhost:5173',
+      REDIS_URL: '',
+    })
+    const port = await gameServer.listen(0)
+    const url = `http://127.0.0.1:${port}`
+    sockets.push(await connectedSocket(url))
+    const created = await emitAck<RoomCredentials>(sockets[0], 'room:create', { name: 'Fast Chatter' })
+
+    let first: Ack<ChatMessage> | undefined
+    for (let message = 0; message < 5; message += 1) {
+      const response = await emitAck<ChatMessage>(sockets[0], 'room:chat:send', {
+        clientMessageId: randomUUID(),
+        text: `Message ${message}`,
+      })
+      first ??= response
+      expect(response.ok).toBe(true)
+    }
+    expect(await emitAck<ChatMessage>(sockets[0], 'room:chat:send', {
+      clientMessageId: first!.data!.clientMessageId,
+      text: first!.data!.text,
+    })).toEqual(first)
+    expect(await emitAck(sockets[0], 'room:chat:send', {
+      clientMessageId: randomUUID(), text: 'Burst overflow',
+    })).toMatchObject({ ok: false, error: expect.stringContaining('wait') })
+
+    sockets[0].disconnect()
+    const reconnected = await connectedSocket(url)
+    sockets.push(reconnected)
+    expect((await emitAck<RoomCredentials>(reconnected, 'room:reconnect', {
+      code: created.data!.code,
+      token: created.data!.token,
+    })).ok).toBe(true)
+    expect(await emitAck(reconnected, 'room:chat:send', {
+      clientMessageId: randomUUID(), text: 'Reconnect cannot bypass the seat limit',
+    })).toMatchObject({ ok: false, error: expect.stringContaining('wait') })
+  })
+
+  it('keeps reaction limits on the seat and excludes a superseded socket from broadcasts', async () => {
+    gameServer = await createGameServer({
+      ...process.env,
+      NODE_ENV: 'test',
+      CLIENT_ORIGIN: 'http://localhost:5173',
+      REDIS_URL: '',
+    })
+    const port = await gameServer.listen(0)
+    const url = `http://127.0.0.1:${port}`
+    sockets.push(await connectedSocket(url), await connectedSocket(url), await connectedSocket(url))
+    const created = await emitAck<RoomCredentials>(sockets[0], 'room:create', { name: 'Reaction Host' })
+    expect((await emitAck<RoomCredentials>(sockets[1], 'room:join', {
+      code: created.data!.code,
+      name: 'Reaction Friend',
+    })).ok).toBe(true)
+
+    for (let count = 0; count < 6; count += 1) {
+      expect((await emitAck<ReactionEvent>(sockets[0], 'room:react', { reaction: 'wah' })).ok).toBe(true)
+    }
+    expect((await emitAck<RoomCredentials>(sockets[2], 'room:reconnect', {
+      code: created.data!.code,
+      token: created.data!.token,
+    })).ok).toBe(true)
+
+    const supersededReactions: ReactionEvent[] = []
+    const currentReactions: ReactionEvent[] = []
+    sockets[0].on('room:reaction', (reaction: ReactionEvent) => supersededReactions.push(reaction))
+    sockets[2].on('room:reaction', (reaction: ReactionEvent) => currentReactions.push(reaction))
+    expect((await emitAck<ReactionEvent>(sockets[1], 'room:react', { reaction: 'oye' })).ok).toBe(true)
+    await new Promise((fulfill) => setTimeout(fulfill, 20))
+    expect(supersededReactions).toEqual([])
+    expect(currentReactions).toHaveLength(1)
+
+    expect(await emitAck(sockets[2], 'room:react', { reaction: 'chalo' })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('wait'),
+    })
+  })
+})
+
+describe('RateLimiter', () => {
+  it('resets a 25-message minute window only after its deadline', () => {
+    let now = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    try {
+      const limiter = new RateLimiter()
+      for (let count = 0; count < 25; count += 1) expect(limiter.consume('seat:room:player:chat', 25, 60_000)).toBe(true)
+      expect(limiter.consume('seat:room:player:chat', 25, 60_000)).toBe(false)
+      now += 59_999
+      expect(limiter.consume('seat:room:player:chat', 25, 60_000)).toBe(false)
+      now += 1
+      expect(limiter.consume('seat:room:player:chat', 25, 60_000)).toBe(true)
+    } finally {
+      clock.mockRestore()
+    }
   })
 })

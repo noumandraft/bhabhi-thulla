@@ -1,9 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode, type SVGProps } from 'react'
 import { io, type Socket } from 'socket.io-client'
-import { PROTOCOL_VERSION, type RoomCredentials, type ServerHello } from '../shared/game'
+import {
+  PROTOCOL_VERSION,
+  REACTIONS,
+  type ChatHistory,
+  type ChatMessage,
+  type ChatMode,
+  type Reaction,
+  type RoomCredentials,
+  type ServerCapability,
+  type ServerHello,
+} from '../shared/game'
 import GameTable from './components/GameTable'
 import { AccessibleDialog } from './components/AccessibleDialog'
+import { TableTalk, type TableTalkLabels } from './components/TableTalk'
 import { Tutorial } from './components/Tutorial'
+import { chatAttemptFor, countUnreadChatMessages, mergeChatMessages, reconcileChatHistory, type PendingChatAttempt } from './chatModel'
 import { languageDirection, translate, type Language, type TFunction } from './i18n'
 import { usePreferences } from './preferences'
 import { DEFAULT_ROOM_SETTINGS, roomSettings, type ClientPlayerView, type ClientRoomView, type TableReaction } from './protocol'
@@ -37,6 +49,24 @@ const DEFAULT_SERVER = window.location.hostname === 'localhost' ? 'http://localh
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || DEFAULT_SERVER
 const QA_FIXTURES_ENABLED = import.meta.env.DEV || import.meta.env.VITE_ENABLE_QA_FIXTURES === 'true'
 const LANGUAGES: Language[] = ['en', 'roman', 'ur']
+
+function reactionLabel(reaction: Reaction, t: TFunction): string {
+  if (reaction === 'thulla') return t('reactionThulla')
+  if (reaction === 'wah') return t('reactionWah')
+  if (reaction === 'oye') return t('reactionOye')
+  if (reaction === 'chalo') return t('reactionChalo')
+  if (reaction === 'bach-gaya') return t('reactionBachGaya')
+  return t('reactionGoodMove')
+}
+
+function readMutedChatPlayers(code: string): string[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(`thulla:chat-mutes:${code}`) ?? '[]')
+    return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : []
+  } catch {
+    return []
+  }
+}
 
 function getInviteCode(): string {
   return new URLSearchParams(window.location.search).get('room')?.toUpperCase().slice(0, 5) ?? ''
@@ -171,7 +201,7 @@ function PlayerSeat({ player, host, busy, t, onKick, onRemoveBot }: { player: Cl
   </div>
 }
 
-function Lobby({ room, socket, t, language, onLanguage, onOpenRules, onLeave, onToast }: { room: ClientRoomView; socket: Socket; t: TFunction; language: Language; onLanguage: (language: Language) => void; onOpenRules: () => void; onLeave: () => void; onToast: (message: string) => void }) {
+function Lobby({ room, socket, t, language, chatSupported, onLanguage, onOpenRules, onLeave, onToast }: { room: ClientRoomView; socket: Socket; t: TFunction; language: Language; chatSupported: boolean; onLanguage: (language: Language) => void; onOpenRules: () => void; onLeave: () => void; onToast: (message: string) => void }) {
   const [busy, setBusy] = useState(false)
   const me = room.players.find((player) => player.isYou)!
   const settings = roomSettings(room)
@@ -204,7 +234,7 @@ function Lobby({ room, socket, t, language, onLanguage, onOpenRules, onLeave, on
         <fieldset className="lobby-settings" disabled={!me.isHost || busy}><legend>{t('tableSettings')}</legend>
           <label><span>{t('turnTimer')}</span><select value={settings.turnSeconds} onChange={(event) => void act('room:settings', { turnSeconds: Number(event.target.value) }, t('settingsUpdateFailed'))}><option value="20">20s</option><option value="35">35s</option><option value="60">60s</option></select></label>
           <label className="switch-row"><span>{t('allowBots')}</span><input type="checkbox" checked={settings.allowBots} onChange={(event) => void act('room:settings', { allowBots: event.target.checked }, t('settingsUpdateFailed'))}/></label>
-          <label className="switch-row"><span>{t('reactions')}</span><input type="checkbox" checked={settings.reactionsEnabled} onChange={(event) => void act('room:settings', { reactionsEnabled: event.target.checked }, t('settingsUpdateFailed'))}/></label>
+          {chatSupported ? <label><span>{t('chatMode')}</span><select value={settings.chatMode} onChange={(event) => { const chatMode = event.target.value as ChatMode; void act('room:settings', chatMode === 'off' ? { chatMode } : { chatMode, reactionsEnabled: true }, t('chatModeUpdateFailed')) }}><option value="text">{t('chatTextAndQuick')}</option><option value="quick">{t('chatQuickOnly')}</option><option value="off">{t('chatOff')}</option></select></label> : <label className="switch-row"><span>{t('reactions')}</span><input type="checkbox" checked={settings.reactionsEnabled} onChange={(event) => void act('room:settings', { reactionsEnabled: event.target.checked }, t('settingsUpdateFailed'))}/></label>}
           <label className="switch-row"><span>{t('tutorialHints')}</span><input type="checkbox" checked={settings.tutorialHints} onChange={(event) => void act('room:settings', { tutorialHints: event.target.checked }, t('settingsUpdateFailed'))}/></label>
           {!me.isHost ? <small>{t('onlyHostSettings')}</small> : null}
         </fieldset>
@@ -231,15 +261,39 @@ export default function App() {
   const [tutorialOpen, setTutorialOpen] = useState(false)
   const [toast, setToast] = useState('')
   const [reaction, setReaction] = useState<TableReaction | null>(null)
+  const [serverCapabilities, setServerCapabilities] = useState<ServerCapability[]>([])
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
+  const chatMessagesRef = useRef<ChatMessage[]>([])
+  const chatEpochRef = useRef<string | null>(null)
+  const [lastReadChatSequence, setLastReadChatSequence] = useState(0)
+  const [tableTalkOpen, setTableTalkOpen] = useState(false)
+  const [chatDraft, setChatDraft] = useState('')
+  const [chatSendError, setChatSendError] = useState('')
+  const [mutedChatPlayerIds, setMutedChatPlayerIds] = useState<string[]>([])
+  const pendingChatAttemptRef = useRef<PendingChatAttempt | null>(null)
+  const historyInitializedCodeRef = useRef<string | null>(null)
+  const previousRoomCodeRef = useRef<string | null>(null)
+  const previousRoomStatusRef = useRef<ClientRoomView['status'] | null>(null)
   const [language, setLanguage] = useState<Language>(getSavedLanguage)
   const languageRef = useRef(language)
   const { preferences, updatePreference } = usePreferences()
   const t = useMemo<TFunction>(() => (key, values) => translate(language, key, values), [language])
+  const displayedRoom = qaRoom ?? room
+  const chatSupported = Boolean(qaRoom) || serverCapabilities.includes('chat-v1')
   const clearSeat = useCallback((code: string | undefined, message = '') => {
     if (code) localStorage.removeItem(`thulla:seat:${code}`)
     credentialsRef.current = null
     setCredentials(null)
     setRoom(null)
+    setChatMessages([])
+    chatMessagesRef.current = []
+    chatEpochRef.current = null
+    setLastReadChatSequence(0)
+    setTableTalkOpen(false)
+    setChatDraft('')
+    setChatSendError('')
+    pendingChatAttemptRef.current = null
+    historyInitializedCodeRef.current = null
     setReconnecting(false)
     setEntryError(message)
     clearRoomFromUrl()
@@ -265,22 +319,140 @@ export default function App() {
       else { setRoom(null); setEntryError(message); clearRoomFromUrl() }
     }
     const onHello = (hello?: Partial<ServerHello>) => {
-      if (hello?.protocolVersion && String(hello.protocolVersion) !== PROTOCOL_VERSION) rejectProtocol()
+      if (hello?.protocolVersion && String(hello.protocolVersion) !== PROTOCOL_VERSION) {
+        rejectProtocol()
+        return
+      }
+      setServerCapabilities((hello?.capabilities ?? []).filter((capability): capability is ServerCapability => capability === 'chat-v1'))
     }
     const onState = (state: ClientRoomView) => {
       if (String(state.protocolVersion) !== PROTOCOL_VERSION) { rejectProtocol(state.code); return }
-      setRoom({ ...state, settings: state.settings ?? DEFAULT_ROOM_SETTINGS })
+      setRoom({ ...state, settings: { ...DEFAULT_ROOM_SETTINGS, ...state.settings } })
     }
     const onReaction = (next: TableReaction) => setReaction(next)
+    const onChatMessage = (message: ChatMessage) => {
+      if (pendingChatAttemptRef.current?.clientMessageId === message.clientMessageId) {
+        pendingChatAttemptRef.current = null
+        setChatSendError('')
+      }
+      const epochChanged = chatEpochRef.current !== null && chatEpochRef.current !== message.epoch
+      chatEpochRef.current = message.epoch
+      if (epochChanged) {
+        chatMessagesRef.current = [message]
+        setChatMessages([message])
+        setLastReadChatSequence(0)
+        pendingChatAttemptRef.current = null
+        return
+      }
+      setChatMessages((current) => {
+        const next = mergeChatMessages(current, [message])
+        chatMessagesRef.current = next
+        return next
+      })
+    }
     const onKicked = ({ code }: { code?: string }) => {
       clearSeat(code ?? credentialsRef.current?.code, 'The host removed you from that room. You can join another table.')
     }
-    socket.on('connect', restoreSeat); socket.on('disconnect', onDisconnect); socket.on('server:hello', onHello); socket.on('room:state', onState); socket.on('room:reaction', onReaction); socket.on('room:kicked', onKicked)
+    socket.on('connect', restoreSeat); socket.on('disconnect', onDisconnect); socket.on('server:hello', onHello); socket.on('room:state', onState); socket.on('room:reaction', onReaction); socket.on('room:chat:message', onChatMessage); socket.on('room:kicked', onKicked)
     if (socket.connected) void restoreSeat(); else socket.connect()
-    return () => { socket.off('connect', restoreSeat); socket.off('disconnect', onDisconnect); socket.off('server:hello', onHello); socket.off('room:state', onState); socket.off('room:reaction', onReaction); socket.off('room:kicked', onKicked); socket.disconnect() }
+    return () => { socket.off('connect', restoreSeat); socket.off('disconnect', onDisconnect); socket.off('server:hello', onHello); socket.off('room:state', onState); socket.off('room:reaction', onReaction); socket.off('room:chat:message', onChatMessage); socket.off('room:kicked', onKicked); socket.disconnect() }
   }, [clearSeat, socket])
+  useEffect(() => { chatMessagesRef.current = chatMessages }, [chatMessages])
+  useEffect(() => {
+    const code = displayedRoom?.code ?? null
+    if (previousRoomCodeRef.current !== code) {
+      previousRoomCodeRef.current = code
+      historyInitializedCodeRef.current = null
+      pendingChatAttemptRef.current = null
+      setChatMessages([])
+      chatMessagesRef.current = []
+      chatEpochRef.current = null
+      setLastReadChatSequence(0)
+      setTableTalkOpen(false)
+      setChatDraft('')
+      setChatSendError('')
+      setMutedChatPlayerIds(code ? readMutedChatPlayers(code) : [])
+    }
+    const status = displayedRoom?.status ?? null
+    if (previousRoomStatusRef.current !== null && previousRoomStatusRef.current !== status) setTableTalkOpen(false)
+    previousRoomStatusRef.current = status
+  }, [displayedRoom?.code, displayedRoom?.status])
+  useEffect(() => {
+    const code = room?.code
+    if (!code || !connected || !chatSupported || qaRoom) return
+    const roomCode = code
+    let cancelled = false
+    async function loadHistory() {
+      const response = await emitWithAck<ChatHistory>(socket, 'room:chat:history', {})
+      if (cancelled || !response.ok || !response.data) return
+      const firstLoadForRoom = historyInitializedCodeRef.current !== roomCode
+      historyInitializedCodeRef.current = roomCode
+      const reconciled = reconcileChatHistory(chatMessagesRef.current, chatEpochRef.current, response.data)
+      chatEpochRef.current = response.data.epoch
+      const next = reconciled.messages
+      chatMessagesRef.current = next
+      setChatMessages(next)
+      if (firstLoadForRoom) {
+        const latestHistorySequence = response.data.messages.reduce((latest, message) => Math.max(latest, message.sequence), 0)
+        setLastReadChatSequence(latestHistorySequence)
+      } else if (reconciled.epochChanged) {
+        setLastReadChatSequence(0)
+        pendingChatAttemptRef.current = null
+      }
+    }
+    void loadHistory()
+    return () => { cancelled = true }
+  }, [chatSupported, connected, qaRoom, room?.code, socket])
   useEffect(() => { if (!toast) return; const timeout = window.setTimeout(() => setToast(''), 3500); return () => window.clearTimeout(timeout) }, [toast])
   useEffect(() => { if (!reaction) return; const timeout = window.setTimeout(() => setReaction(null), 2800); return () => window.clearTimeout(timeout) }, [reaction?.id])
+
+  const activeRoomSettings = displayedRoom ? roomSettings(displayedRoom) : DEFAULT_ROOM_SETTINGS
+  const tableTalkAvailable = Boolean(displayedRoom) && displayedRoom?.status !== 'finished' && displayedRoom?.game?.phase !== 'resolving'
+  const quickTalkEnabled = Boolean(displayedRoom) && activeRoomSettings.reactionsEnabled && (!chatSupported || activeRoomSettings.chatMode !== 'off')
+  const textTalkEnabled = Boolean(displayedRoom) && chatSupported && activeRoomSettings.chatMode === 'text'
+  const visibleReaction = reaction && !mutedChatPlayerIds.includes(reaction.playerId) ? reaction : null
+  const isMyTurn = Boolean(displayedRoom?.game?.phase === 'turn' && displayedRoom.game.currentTurnId === displayedRoom.yourPlayerId)
+  const tableTalkParticipants = useMemo(() => displayedRoom?.players.map((player) => ({ id: player.id, name: player.name, canMute: !player.isBot })) ?? [], [displayedRoom?.players])
+  const tableTalkReactions = useMemo(() => REACTIONS.map((reaction) => ({ id: reaction, label: reactionLabel(reaction, t) })), [t])
+  const unreadChatCount = useMemo(() => {
+    if (!displayedRoom || preferences.chatNotificationsMuted || !textTalkEnabled) return 0
+    return countUnreadChatMessages(chatMessages, lastReadChatSequence, displayedRoom.yourPlayerId, mutedChatPlayerIds)
+  }, [chatMessages, displayedRoom, lastReadChatSequence, mutedChatPlayerIds, preferences.chatNotificationsMuted, textTalkEnabled])
+  const tableTalkLabels = useMemo<Partial<TableTalkLabels>>(() => ({
+    title: t('tableTalk'),
+    open: t('openTableTalk'),
+    openWithUnread: (count) => t('openTableTalkUnread', { count }),
+    close: t('closeTableTalk'),
+    quickTab: t('quickReactions'),
+    chatTab: t('textChat'),
+    quickHint: t('quickReactionHint'),
+    noMessages: t('noChatMessages'),
+    messageList: t('chatMessageList'),
+    newMessages: t('newMessages'),
+    yourTurn: t('yourTurn'),
+    returnToCards: t('returnToCards'),
+    messageLabel: t('chatMessageLabel'),
+    messagePlaceholder: t('chatPlaceholder'),
+    send: t('sendMessage'),
+    sending: t('sendingMessage'),
+    sendFailed: t('chatSendFailed'),
+    charactersRemaining: (count) => t('charactersRemaining', { count }),
+    privacyHint: t('chatPrivacy'),
+    playerControls: t('chatPlayerControls'),
+    mute: t('mute'),
+    unmute: t('unmute'),
+    mutePlayer: (name) => t('mutePlayer', { name }),
+    unmutePlayer: (name) => t('unmutePlayer', { name }),
+    mutedCount: (count) => t('mutedCount', { count }),
+  }), [t])
+  const formatChatTime = useMemo(() => {
+    const formatter = new Intl.DateTimeFormat(language === 'ur' ? 'ur-PK' : 'en-PK', { hour: 'numeric', minute: '2-digit' })
+    return (createdAt: number) => formatter.format(new Date(createdAt))
+  }, [language])
+
+  useEffect(() => {
+    if (!tableTalkAvailable || (!quickTalkEnabled && !textTalkEnabled)) setTableTalkOpen(false)
+  }, [quickTalkEnabled, tableTalkAvailable, textTalkEnabled])
 
   function entered(next: RoomCredentials) { saveCredentials(next); setCredentials(next); credentialsRef.current = next; setEntryError('') }
   async function leaveRoom() {
@@ -294,11 +466,89 @@ export default function App() {
     clearSeat(saved?.code)
   }
 
-  const displayedRoom = qaRoom ?? room
+  function changeChatDraft(nextDraft: string) {
+    if (pendingChatAttemptRef.current?.text !== nextDraft.trim()) pendingChatAttemptRef.current = null
+    setChatDraft(nextDraft)
+    setChatSendError('')
+  }
+
+  function toggleChatPlayerMute(playerId: string, muted: boolean) {
+    if (!displayedRoom) return
+    setMutedChatPlayerIds((current) => {
+      const next = muted ? [...new Set([...current, playerId])] : current.filter((id) => id !== playerId)
+      localStorage.setItem(`thulla:chat-mutes:${displayedRoom.code}`, JSON.stringify(next))
+      return next
+    })
+  }
+
+  async function sendChatMessage(text: string) {
+    if (!connected || !room) {
+      setChatSendError(t('connectionWait'))
+      throw new Error('Not connected')
+    }
+    const cleanText = text.trim()
+    const attempt = chatAttemptFor(cleanText, pendingChatAttemptRef.current, () => crypto.randomUUID())
+    pendingChatAttemptRef.current = attempt
+    const response = await emitWithAck<ChatMessage>(socket, 'room:chat:send', attempt)
+    if (!response.ok || !response.data) {
+      const delivered = chatMessagesRef.current.some((message) => message.clientMessageId === attempt.clientMessageId)
+      if (delivered) {
+        pendingChatAttemptRef.current = null
+        setChatSendError('')
+        return
+      }
+      setChatSendError(response.error ?? t('chatSendFailed'))
+      throw new Error(response.error ?? 'Chat send failed')
+    }
+    const next = mergeChatMessages(chatMessagesRef.current, [response.data])
+    chatMessagesRef.current = next
+    setChatMessages(next)
+    pendingChatAttemptRef.current = null
+    setChatSendError('')
+  }
+
+  async function sendTableReaction(reactionId: string) {
+    if (!REACTIONS.includes(reactionId as Reaction)) throw new Error('Unknown reaction')
+    const response = await emitWithAck(socket, 'room:react', { reaction: reactionId })
+    if (!response.ok) {
+      setToast(response.error ?? t('reactionFailed'))
+      throw new Error(response.error ?? 'Reaction send failed')
+    }
+  }
+
   if (reconnecting && !displayedRoom) return <main className="loading-screen"><Logo/><span className="spinner spinner--large"/><p>{t('findingSeat')}</p></main>
 
   return <>
-    {!displayedRoom ? <><Landing socket={socket} connected={connected} inviteCode={inviteCode} t={t} language={language} onLanguage={setLanguage} onEntered={entered} onOpenRules={() => setRulesOpen(true)} onOpenTutorial={() => setTutorialOpen(true)} onToast={setToast}/>{entryError ? <div className="entry-banner" role="alert">{entryError}</div> : null}</> : displayedRoom.status === 'lobby' ? <Lobby room={displayedRoom} socket={socket} t={t} language={language} onLanguage={setLanguage} onOpenRules={() => setRulesOpen(true)} onLeave={leaveRoom} onToast={setToast}/> : <GameTable room={displayedRoom} socket={socket} connected={connected} t={t} language={language} onLanguage={setLanguage} preferences={preferences} onPreference={updatePreference} liveReaction={reaction} onOpenRules={() => setRulesOpen(true)} onLeave={leaveRoom} onToast={setToast}/>}
+    {!displayedRoom ? <><Landing socket={socket} connected={connected} inviteCode={inviteCode} t={t} language={language} onLanguage={setLanguage} onEntered={entered} onOpenRules={() => setRulesOpen(true)} onOpenTutorial={() => setTutorialOpen(true)} onToast={setToast}/>{entryError ? <div className="entry-banner" role="alert">{entryError}</div> : null}</> : displayedRoom.status === 'lobby' ? <Lobby room={displayedRoom} socket={socket} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} onOpenRules={() => setRulesOpen(true)} onLeave={leaveRoom} onToast={setToast}/> : <GameTable room={displayedRoom} socket={socket} connected={connected} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} preferences={preferences} onPreference={updatePreference} liveReaction={visibleReaction} onOpenRules={() => setRulesOpen(true)} onLeave={leaveRoom} onToast={setToast}/>}
+    {displayedRoom?.status === 'lobby' && visibleReaction && !preferences.reactionsMuted ? <div className={`table-talk__lobby-reaction ${tableTalkOpen ? 'is-drawer-open' : ''}`} role="status" aria-live="polite"><b>{visibleReaction.playerId === displayedRoom.yourPlayerId ? t('you') : visibleReaction.playerName}</b><span>{reactionLabel(visibleReaction.reaction, t)}</span></div> : null}
+    {displayedRoom && tableTalkAvailable ? <TableTalk
+      className={`table-talk--${displayedRoom.status === 'lobby' ? 'lobby' : 'game'}`}
+      open={tableTalkOpen}
+      unreadCount={unreadChatCount}
+      messages={chatMessages}
+      participants={tableTalkParticipants}
+      myPlayerId={displayedRoom.yourPlayerId}
+      quickReactions={tableTalkReactions}
+      mutedPlayerIds={mutedChatPlayerIds}
+      isMyTurn={isMyTurn}
+      quickEnabled={quickTalkEnabled}
+      chatEnabled={textTalkEnabled}
+      sendDisabled={!connected || Boolean(qaRoom)}
+      initialTab={textTalkEnabled ? 'chat' : 'quick'}
+      labels={tableTalkLabels}
+      formatTime={formatChatTime}
+      draft={chatDraft}
+      sendError={chatSendError || null}
+      onOpen={() => setTableTalkOpen(true)}
+      onClose={() => setTableTalkOpen(false)}
+      onReturnToCards={() => window.requestAnimationFrame(() => document.getElementById('game-v2-hand')?.focus())}
+      onDraftChange={changeChatDraft}
+      onClearSendError={() => setChatSendError('')}
+      onSendMessage={sendChatMessage}
+      onSendQuickReaction={sendTableReaction}
+      onTogglePlayerMute={toggleChatPlayerMute}
+      onMessagesRead={(sequence) => setLastReadChatSequence((current) => Math.max(current, sequence))}
+    /> : null}
     {rulesOpen ? <RulesModal t={t} onClose={() => setRulesOpen(false)}/> : null}
     {tutorialOpen ? <Tutorial t={t} onClose={() => setTutorialOpen(false)} onComplete={() => updatePreference('tutorialComplete', true)}/> : null}
     {toast ? <div className="toast" role="status" aria-live="polite"><Check size={18}/> {toast}</div> : null}

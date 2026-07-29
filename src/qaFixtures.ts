@@ -40,7 +40,7 @@ export function makeQaRoom(mode: string | null): ClientRoomView | null {
   }
   if (!room.game) return room
   if (mode === 'resolving') {
-    room.game.phase = 'resolving'; room.game.currentTurnId = null; room.game.turnEndsAt = null; room.game.legalCardIds = []; room.game.hand = cards.slice(0, 5); room.game.resolutionEndsAt = Date.now() + 30_000; room.game.pendingTurnId = 'p2'
+    room.game.phase = 'resolving'; room.game.currentTurnId = null; room.game.turnEndsAt = null; room.game.legalCardIds = []; room.game.hand = cards.slice(0, 5); room.game.resolutionEndsAt = Date.now() + 5 * 60_000; room.game.pendingTurnId = 'p2'
     room.game.resolvedTrick = { kind: 'thulla', winnerId: 'p2', lastPlayerId: 'p3', cards: [
       { playerId: 'p1', playerName: 'Hamza', card: { id: 'qa-s8', suit: 'spades', rank: '8' } },
       { playerId: 'p2', playerName: 'Ayesha', card: { id: 'qa-sk', suit: 'spades', rank: 'K' } },
@@ -59,4 +59,3 @@ export function makeQaRoom(mode: string | null): ClientRoomView | null {
   }
   return room
 }
-

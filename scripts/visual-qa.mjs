@@ -168,6 +168,21 @@ const diagnosticsExpression = `(() => {
   const rightBox = rightSeat?.getBoundingClientRect()
   const resolution = document.querySelector('.game-v2-resolution, [data-game-phase="resolving"]')
   const lastCard = document.querySelector('.game-v2-trick-card.is-last-played')
+  const thullaStatus = document.querySelector('.game-v2-status.is-thulla')
+  const thullaStatusRect = thullaStatus?.getBoundingClientRect()
+  const lastCardRect = lastCard?.getBoundingClientRect()
+  const lastCardStyle = lastCard ? getComputedStyle(lastCard) : null
+  const lastCardVisible = Boolean(lastCardRect && lastCardStyle
+    && lastCardRect.width > 0
+    && lastCardRect.height > 0
+    && lastCardStyle.display !== 'none'
+    && lastCardStyle.visibility !== 'hidden'
+    && Number(lastCardStyle.opacity) > 0.1)
+  const thullaStatusOverlapsLastCard = Boolean(thullaStatusRect && lastCardRect
+    && thullaStatusRect.left < lastCardRect.right
+    && thullaStatusRect.right > lastCardRect.left
+    && thullaStatusRect.top < lastCardRect.bottom
+    && thullaStatusRect.bottom > lastCardRect.top)
   return {
     viewport: [innerWidth, innerHeight],
     pageOverflowX: root.scrollWidth > innerWidth + 1,
@@ -175,7 +190,9 @@ const diagnosticsExpression = `(() => {
     rightSeatVisible: rightBox ? rightBox.right > 0 && rightBox.left < innerWidth && rightBox.bottom > 0 && rightBox.top < innerHeight : null,
     resolutionText: resolution?.textContent?.trim().replace(/\\s+/g, ' ') ?? null,
     visibleTrickCards: document.querySelectorAll('.game-v2-trick-card').length,
-    lastCardVisible: Boolean(lastCard),
+    lastCardVisible,
+    thullaStatusVisible: Boolean(thullaStatus),
+    thullaStatusOverlapsLastCard,
     clockVisible: Boolean(document.querySelector('.game-v2-clock, .turn-clock')),
     emptyTrickVisible: Boolean(document.querySelector('.game-v2-empty-trick')),
     focusableDisplayCards: document.querySelectorAll('.game-v2-trick button, .game-v2-waste button, .waste-stack button, .current-trick button').length,
@@ -295,8 +312,9 @@ try {
     await waitForExpression(cdp, `Boolean(document.querySelector(${JSON.stringify(fixture.selector)}))`)
     const portrait = await capture(cdp, `fixture-${fixture.mode}-mobile`, 390, 844)
     const landscape = await capture(cdp, `fixture-${fixture.mode}-landscape`, 844, 390)
-    fixtureResults[fixture.mode] = { portrait, landscape }
-    for (const result of [portrait, landscape]) {
+    const desktop = fixture.mode === 'resolving' ? await capture(cdp, `fixture-${fixture.mode}-desktop`, 1366, 768) : null
+    fixtureResults[fixture.mode] = { portrait, landscape, desktop }
+    for (const result of [portrait, landscape, desktop].filter(Boolean)) {
       assert(!result.pageOverflowX, `${fixture.mode} fixture has horizontal overflow at ${result.viewport.join('x')}.`)
       assert(result.touchViolations.length === 0, `${fixture.mode} fixture has touch targets under 44px at ${result.viewport.join('x')}: ${JSON.stringify(result.touchViolations)}`)
       assert(result.unnamedControls.length === 0, `${fixture.mode} fixture has unnamed controls at ${result.viewport.join('x')}.`)
@@ -304,6 +322,13 @@ try {
     }
   }
   assert(fixtureResults.resolving.portrait.lastCardVisible, 'The resolving fixture does not identify the THULLA card.')
+  assert(fixtureResults.resolving.portrait.thullaStatusVisible, 'The portrait resolving fixture does not show the THULLA announcement.')
+  assert(!fixtureResults.resolving.portrait.thullaStatusOverlapsLastCard, 'The portrait THULLA announcement covers the final card.')
+  assert(fixtureResults.resolving.landscape.thullaStatusVisible, 'The landscape resolving fixture does not show the THULLA announcement.')
+  assert(!fixtureResults.resolving.landscape.thullaStatusOverlapsLastCard, 'The landscape THULLA announcement covers the final card.')
+  assert(fixtureResults.resolving.desktop.lastCardVisible, 'The desktop resolving fixture does not visibly render the THULLA card.')
+  assert(fixtureResults.resolving.desktop.thullaStatusVisible, 'The desktop resolving fixture does not show the THULLA announcement.')
+  assert(!fixtureResults.resolving.desktop.thullaStatusOverlapsLastCard, 'The desktop THULLA announcement covers the final card.')
   assert(!fixtureResults.resolving.portrait.clockVisible, 'The resolving fixture displays a running timer.')
   assert(!fixtureResults.reconnect.portrait.clockVisible, 'The reconnect fixture displays a running timer.')
 

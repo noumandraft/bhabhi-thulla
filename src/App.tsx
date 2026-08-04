@@ -30,12 +30,14 @@ function Icon({ size = 24, children, ...props }: IconProps & { children: ReactNo
 
 const BookOpen = (props: IconProps) => <Icon {...props}><path d="M2 4h6a4 4 0 0 1 4 4v12a4 4 0 0 0-4-4H2z"/><path d="M22 4h-6a4 4 0 0 0-4 4v12a4 4 0 0 1 4-4h6z"/></Icon>
 const Bot = (props: IconProps) => <Icon {...props}><rect x="4" y="7" width="16" height="13" rx="3"/><path d="M12 3v4M8 12h.01M16 12h.01M8 16h8"/></Icon>
+const CircleAlert = (props: IconProps) => <Icon {...props}><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 17h.01"/></Icon>
 const Check = (props: IconProps) => <Icon {...props}><path d="m5 12 4 4L19 6"/></Icon>
 const ChevronRight = (props: IconProps) => <Icon {...props}><path d="m9 18 6-6-6-6"/></Icon>
 const Clock3 = (props: IconProps) => <Icon {...props}><circle cx="12" cy="12" r="9"/><path d="M12 7v5h4"/></Icon>
 const Copy = (props: IconProps) => <Icon {...props}><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></Icon>
 const Crown = (props: IconProps) => <Icon {...props}><path d="m3 6 4 5 5-7 5 7 4-5-2 12H5z"/><path d="M5 21h14"/></Icon>
 const LogOut = (props: IconProps) => <Icon {...props}><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/><path d="M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/></Icon>
+const Info = (props: IconProps) => <Icon {...props}><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></Icon>
 const Play = (props: IconProps) => <Icon {...props}><path d="m7 4 13 8L7 20z"/></Icon>
 const Share2 = (props: IconProps) => <Icon {...props}><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/></Icon>
 const ShieldCheck = (props: IconProps) => <Icon {...props}><path d="M12 3 4 6v5c0 5 3.4 8.5 8 10 4.6-1.5 8-5 8-10V6z"/><path d="m8.5 12 2.2 2.2 4.8-5"/></Icon>
@@ -49,6 +51,13 @@ const DEFAULT_SERVER = window.location.hostname === 'localhost' ? 'http://localh
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || DEFAULT_SERVER
 const QA_FIXTURES_ENABLED = import.meta.env.DEV || import.meta.env.VITE_ENABLE_QA_FIXTURES === 'true'
 const LANGUAGES: Language[] = ['en', 'roman', 'ur']
+export type ToastTone = 'success' | 'error' | 'info'
+type ToastNotice = { message: string; tone: ToastTone }
+type ShowToast = (message: string, tone?: ToastTone) => void
+
+function isShareCancelled(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
 
 function reactionLabel(reaction: Reaction, t: TFunction): string {
   if (reaction === 'thulla') return t('reactionThulla')
@@ -123,13 +132,22 @@ function RulesModal({ t, onClose }: { t: TFunction; onClose: () => void }) {
 
 function Landing({ socket, connected, inviteCode, t, language, onLanguage, onEntered, onOpenRules, onOpenTutorial, onToast }: {
   socket: Socket; connected: boolean; inviteCode: string; t: TFunction; language: Language; onLanguage: (language: Language) => void
-  onEntered: (credentials: RoomCredentials) => void; onOpenRules: () => void; onOpenTutorial: () => void; onToast: (message: string) => void
+  onEntered: (credentials: RoomCredentials) => void; onOpenRules: () => void; onOpenTutorial: () => void; onToast: ShowToast
 }) {
   const [mode, setMode] = useState<'create' | 'join'>(inviteCode ? 'join' : 'create')
   const [name, setName] = useState(() => localStorage.getItem('thulla:name') ?? '')
   const [code, setCode] = useState(inviteCode)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [wakeElapsed, setWakeElapsed] = useState(0)
+
+  useEffect(() => {
+    if (connected) { setWakeElapsed(0); return }
+    const startedAt = Date.now()
+    setWakeElapsed(0)
+    const interval = window.setInterval(() => setWakeElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1_000)
+    return () => window.clearInterval(interval)
+  }, [connected])
 
   async function enterRoom(createPractice = false) {
     setError('')
@@ -150,8 +168,8 @@ function Landing({ socket, connected, inviteCode, t, language, onLanguage, onEnt
       if (first.ok && second.ok) {
         await emitWithAck(socket, 'room:ready', { ready: true })
         const start = await emitWithAck(socket, 'game:start', {})
-        if (!start.ok) onToast(start.error ?? t('practiceCreated'))
-      } else onToast(first.error ?? second.error ?? t('roomCreatedBots'))
+        if (!start.ok) onToast(start.error ?? t('startFailed'), 'error')
+      } else onToast(first.error ?? second.error ?? t('practiceSetupFailed'), 'error')
     }
     setLoading(false)
   }
@@ -174,7 +192,7 @@ function Landing({ socket, connected, inviteCode, t, language, onLanguage, onEnt
         <div className="trust-row"><span><ShieldCheck size={18}/> {t('serverChecked')}</span><span><Users size={18}/> {t('playerCount')}</span><span><Clock3 size={18}/> {t('roundLength')}</span></div>
       </section>
       <section className="join-card" aria-labelledby="join-heading">
-        <div className="connection-label" data-connected={connected}>{connected ? <Wifi size={16}/> : <WifiOff size={16}/>} {connected ? t('serverReady') : t('wakingServer')}</div>
+        <div className="connection-label" data-connected={connected}><span>{connected ? <Wifi size={16}/> : <WifiOff size={16}/>} {connected ? t('serverReady') : wakeElapsed >= 8 ? t('wakingServerElapsed', { count: wakeElapsed }) : t('wakingServer')}</span>{!connected && wakeElapsed >= 8 ? <button type="button" onClick={() => { socket.disconnect(); socket.connect(); setWakeElapsed(0) }}>{t('retryConnection')}</button> : null}</div>
         <span className="eyebrow">{t('pullUpChair')}</span><h2 id="join-heading">{mode === 'create' ? t('startPrivate') : t('joinFriends')}</h2>
         <div className="mode-tabs" aria-label={t('chooseRoomAction')}><button type="button" aria-pressed={mode === 'create'} onClick={() => { setMode('create'); setError('') }}>{t('createRoom')}</button><button type="button" aria-pressed={mode === 'join'} onClick={() => { setMode('join'); setError('') }}>{t('joinRoom')}</button></div>
         <form onSubmit={submit}>
@@ -197,11 +215,16 @@ function PlayerSeat({ player, host, busy, t, onKick, onRemoveBot }: { player: Cl
     <div className="player-seat__avatar">{player.isBot ? <Bot size={19}/> : initials}</div><div className="player-seat__copy"><b>{player.name}{player.isYou ? ` (${t('you')})` : ''}</b><span>{player.isBot ? `${t('bot')} · ${status}` : status}</span></div>
     {player.isHost ? <Crown className="host-crown" size={16} aria-label={t('host')}/> : null}
     {player.ready ? <Check className="ready-check" size={18} aria-label={t('playerReady')}/> : null}
-    {host && !player.isYou && !player.isHost ? <button className="seat-remove" type="button" disabled={busy} aria-label={`${player.isBot ? t('removeBot') : t('removePlayer')}: ${player.name}`} onClick={() => player.isBot ? onRemoveBot(player.id) : onKick(player.id)}><Trash size={17}/></button> : null}
+    {host && !player.isYou && !player.isHost ? <button className="seat-remove" type="button" disabled={busy} aria-label={`${player.isBot ? t('removeBot') : t('removePlayer')}: ${player.name}`} onClick={() => {
+      const confirmed = window.confirm(player.isBot ? t('removeBotConfirm', { name: player.name }) : t('removePlayerConfirm', { name: player.name }))
+      if (!confirmed) return
+      if (player.isBot) onRemoveBot(player.id)
+      else onKick(player.id)
+    }}><Trash size={17}/></button> : null}
   </div>
 }
 
-function Lobby({ room, socket, t, language, chatSupported, onLanguage, onOpenRules, onLeave, onToast }: { room: ClientRoomView; socket: Socket; t: TFunction; language: Language; chatSupported: boolean; onLanguage: (language: Language) => void; onOpenRules: () => void; onLeave: () => void; onToast: (message: string) => void }) {
+function Lobby({ room, socket, t, language, chatSupported, onLanguage, onOpenRules, onLeave, onToast }: { room: ClientRoomView; socket: Socket; t: TFunction; language: Language; chatSupported: boolean; onLanguage: (language: Language) => void; onOpenRules: () => void; onLeave: () => void; onToast: ShowToast }) {
   const [busy, setBusy] = useState(false)
   const me = room.players.find((player) => player.isYou)!
   const settings = roomSettings(room)
@@ -210,12 +233,19 @@ function Lobby({ room, socket, t, language, chatSupported, onLanguage, onOpenRul
   const scores = room.session?.scores ?? []
 
   async function act(event: string, payload: unknown, fallback: string) {
-    setBusy(true); const response = await emitWithAck(socket, event, payload); setBusy(false); if (!response.ok) onToast(response.error ?? fallback)
+    setBusy(true); const response = await emitWithAck(socket, event, payload); setBusy(false); if (!response.ok) onToast(response.error ?? fallback, 'error')
   }
   async function copyInvite() {
     const message = t('inviteMessage', { url: inviteUrl })
-    try { if (navigator.share) await navigator.share({ title: 'Bhabhi Thulla', text: message, url: inviteUrl }); else await navigator.clipboard.writeText(message); onToast(t('inviteCopied')) }
-    catch { try { await navigator.clipboard.writeText(message); onToast(t('inviteCopied')) } catch { onToast(room.code) } }
+    try {
+      if (navigator.share) await navigator.share({ title: 'Bhabhi Thulla', text: message, url: inviteUrl })
+      else await navigator.clipboard.writeText(message)
+      onToast(t('inviteCopied'), 'success')
+    } catch (error) {
+      if (isShareCancelled(error)) return
+      try { await navigator.clipboard.writeText(message); onToast(t('inviteCopied'), 'success') }
+      catch { onToast(t('copyInviteFailed', { code: room.code }), 'error') }
+    }
   }
   const participants = room.players.filter((player) => player.isBot || player.connected)
   const allReady = participants.length >= room.minPlayers && participants.every((player) => player.isBot || player.ready)
@@ -256,10 +286,11 @@ export default function App() {
   const qaRoom = useMemo(() => QA_FIXTURES_ENABLED ? makeQaRoom(new URLSearchParams(window.location.search).get('qa')) : null, [])
   const [connected, setConnected] = useState(false)
   const [reconnecting, setReconnecting] = useState(Boolean(initialCredentials))
+  const [restoreElapsed, setRestoreElapsed] = useState(0)
   const [entryError, setEntryError] = useState('')
   const [rulesOpen, setRulesOpen] = useState(false)
   const [tutorialOpen, setTutorialOpen] = useState(false)
-  const [toast, setToast] = useState('')
+  const [toast, setToast] = useState<ToastNotice | null>(null)
   const [reaction, setReaction] = useState<TableReaction | null>(null)
   const [serverCapabilities, setServerCapabilities] = useState<ServerCapability[]>([])
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
@@ -278,6 +309,7 @@ export default function App() {
   const languageRef = useRef(language)
   const { preferences, updatePreference } = usePreferences()
   const t = useMemo<TFunction>(() => (key, values) => translate(language, key, values), [language])
+  const showToast = useCallback<ShowToast>((message, tone = 'info') => setToast({ message, tone }), [])
   const displayedRoom = qaRoom ?? room
   const chatSupported = Boolean(qaRoom) || serverCapabilities.includes('chat-v1')
   const clearSeat = useCallback((code: string | undefined, message = '') => {
@@ -301,6 +333,12 @@ export default function App() {
 
   useEffect(() => { languageRef.current = language; localStorage.setItem('thulla:language', language); document.documentElement.lang = language === 'ur' ? 'ur' : 'en'; document.documentElement.dir = languageDirection(language) }, [language])
   useEffect(() => { credentialsRef.current = credentials }, [credentials])
+  useEffect(() => {
+    if (!reconnecting || displayedRoom) { setRestoreElapsed(0); return }
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => setRestoreElapsed(Math.floor((Date.now() - startedAt) / 1_000)), 1_000)
+    return () => window.clearInterval(timer)
+  }, [displayedRoom, reconnecting])
   useEffect(() => {
     let attemptedForConnection = false
     async function restoreSeat() {
@@ -374,7 +412,13 @@ export default function App() {
       setMutedChatPlayerIds(code ? readMutedChatPlayers(code) : [])
     }
     const status = displayedRoom?.status ?? null
-    if (previousRoomStatusRef.current !== null && previousRoomStatusRef.current !== status) setTableTalkOpen(false)
+    if (previousRoomStatusRef.current !== null && previousRoomStatusRef.current !== status) {
+      setTableTalkOpen(false)
+      if (status === 'playing' || status === 'finished') {
+        setRulesOpen(false)
+        setTutorialOpen(false)
+      }
+    }
     previousRoomStatusRef.current = status
   }, [displayedRoom?.code, displayedRoom?.status])
   useEffect(() => {
@@ -403,7 +447,7 @@ export default function App() {
     void loadHistory()
     return () => { cancelled = true }
   }, [chatSupported, connected, qaRoom, room?.code, socket])
-  useEffect(() => { if (!toast) return; const timeout = window.setTimeout(() => setToast(''), 3500); return () => window.clearTimeout(timeout) }, [toast])
+  useEffect(() => { if (!toast) return; const timeout = window.setTimeout(() => setToast(null), 3500); return () => window.clearTimeout(timeout) }, [toast])
   useEffect(() => { if (!reaction) return; const timeout = window.setTimeout(() => setReaction(null), 2800); return () => window.clearTimeout(timeout) }, [reaction?.id])
 
   const activeRoomSettings = displayedRoom ? roomSettings(displayedRoom) : DEFAULT_ROOM_SETTINGS
@@ -436,6 +480,7 @@ export default function App() {
     send: t('sendMessage'),
     sending: t('sendingMessage'),
     sendFailed: t('chatSendFailed'),
+    quickSendFailed: t('reactionFailed'),
     charactersRemaining: (count) => t('charactersRemaining', { count }),
     privacyHint: t('chatPrivacy'),
     playerControls: t('chatPlayerControls'),
@@ -454,9 +499,22 @@ export default function App() {
     if (!tableTalkAvailable || (!quickTalkEnabled && !textTalkEnabled)) setTableTalkOpen(false)
   }, [quickTalkEnabled, tableTalkAvailable, textTalkEnabled])
 
+  useEffect(() => {
+    if (!isMyTurn) return
+    setRulesOpen(false)
+    setTutorialOpen(false)
+  }, [isMyTurn])
+  useEffect(() => {
+    if (displayedRoom?.game?.phase !== 'resolving' && displayedRoom?.status !== 'finished') return
+    setRulesOpen(false)
+    setTutorialOpen(false)
+    setTableTalkOpen(false)
+  }, [displayedRoom?.game?.phase, displayedRoom?.status])
+
   function entered(next: RoomCredentials) { saveCredentials(next); setCredentials(next); credentialsRef.current = next; setEntryError('') }
   async function leaveRoom() {
     const saved = credentialsRef.current
+    if (displayedRoom?.status === 'playing' && !window.confirm(t('leaveActiveConfirm'))) return
     if (socket.connected && saved) {
       await Promise.race([
         emitWithAck(socket, 'room:leave', {}),
@@ -483,7 +541,7 @@ export default function App() {
 
   async function sendChatMessage(text: string) {
     if (!connected || !room) {
-      setChatSendError(t('connectionWait'))
+      setChatSendError(t('offlineChat'))
       throw new Error('Not connected')
     }
     const cleanText = text.trim()
@@ -510,16 +568,13 @@ export default function App() {
   async function sendTableReaction(reactionId: string) {
     if (!REACTIONS.includes(reactionId as Reaction)) throw new Error('Unknown reaction')
     const response = await emitWithAck(socket, 'room:react', { reaction: reactionId })
-    if (!response.ok) {
-      setToast(response.error ?? t('reactionFailed'))
-      throw new Error(response.error ?? 'Reaction send failed')
-    }
+    if (!response.ok) throw new Error(response.error ?? 'Reaction send failed')
   }
 
-  if (reconnecting && !displayedRoom) return <main className="loading-screen"><Logo/><span className="spinner spinner--large"/><p>{t('findingSeat')}</p></main>
+  if (reconnecting && !displayedRoom) return <main className="loading-screen"><Logo/><span className="spinner spinner--large"/><div className="loading-screen__copy"><p>{t('findingSeat')}</p>{restoreElapsed >= 8 ? <small>{t('findingSeatElapsed', { count: restoreElapsed })}</small> : null}</div>{restoreElapsed >= 12 ? <div className="loading-screen__actions"><button className="button button--primary" type="button" onClick={() => { socket.disconnect(); socket.connect(); setRestoreElapsed(0) }}>{t('retryConnection')}</button><button className="button button--secondary" type="button" onClick={() => clearSeat(credentials?.code, t('seatRestoreAbandoned'))}>{t('forgetSavedSeat')}</button></div> : null}</main>
 
   return <>
-    {!displayedRoom ? <><Landing socket={socket} connected={connected} inviteCode={inviteCode} t={t} language={language} onLanguage={setLanguage} onEntered={entered} onOpenRules={() => setRulesOpen(true)} onOpenTutorial={() => setTutorialOpen(true)} onToast={setToast}/>{entryError ? <div className="entry-banner" role="alert">{entryError}</div> : null}</> : displayedRoom.status === 'lobby' ? <Lobby room={displayedRoom} socket={socket} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} onOpenRules={() => setRulesOpen(true)} onLeave={leaveRoom} onToast={setToast}/> : <GameTable room={displayedRoom} socket={socket} connected={connected} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} preferences={preferences} onPreference={updatePreference} liveReaction={visibleReaction} onOpenRules={() => setRulesOpen(true)} onLeave={leaveRoom} onToast={setToast}/>}
+    {!displayedRoom ? <><Landing socket={socket} connected={connected} inviteCode={inviteCode} t={t} language={language} onLanguage={setLanguage} onEntered={entered} onOpenRules={() => setRulesOpen(true)} onOpenTutorial={() => setTutorialOpen(true)} onToast={showToast}/>{entryError ? <div className="entry-banner" role="alert">{entryError}</div> : null}</> : displayedRoom.status === 'lobby' ? <Lobby room={displayedRoom} socket={socket} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} onOpenRules={() => setRulesOpen(true)} onLeave={leaveRoom} onToast={showToast}/> : <GameTable room={displayedRoom} socket={socket} connected={connected} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} preferences={preferences} onPreference={updatePreference} liveReaction={visibleReaction} onOpenRules={() => setRulesOpen(true)} onLeave={leaveRoom} onToast={showToast}/>}
     {displayedRoom?.status === 'lobby' && visibleReaction && !preferences.reactionsMuted ? <div className={`table-talk__lobby-reaction ${tableTalkOpen ? 'is-drawer-open' : ''}`} role="status" aria-live="polite"><b>{visibleReaction.playerId === displayedRoom.yourPlayerId ? t('you') : visibleReaction.playerName}</b><span>{reactionLabel(visibleReaction.reaction, t)}</span></div> : null}
     {displayedRoom && tableTalkAvailable ? <TableTalk
       className={`table-talk--${displayedRoom.status === 'lobby' ? 'lobby' : 'game'}`}
@@ -538,7 +593,7 @@ export default function App() {
       labels={tableTalkLabels}
       formatTime={formatChatTime}
       draft={chatDraft}
-      sendError={chatSendError || null}
+      sendError={!qaRoom && !connected ? t('offlineChat') : chatSendError || null}
       onOpen={() => setTableTalkOpen(true)}
       onClose={() => setTableTalkOpen(false)}
       onReturnToCards={() => window.requestAnimationFrame(() => document.getElementById('game-v2-hand')?.focus())}
@@ -551,6 +606,6 @@ export default function App() {
     /> : null}
     {rulesOpen ? <RulesModal t={t} onClose={() => setRulesOpen(false)}/> : null}
     {tutorialOpen ? <Tutorial t={t} onClose={() => setTutorialOpen(false)} onComplete={() => updatePreference('tutorialComplete', true)}/> : null}
-    {toast ? <div className="toast" role="status" aria-live="polite"><Check size={18}/> {toast}</div> : null}
+    {toast ? <div className={`toast toast--${toast.tone}`} data-tone={toast.tone} role={toast.tone === 'error' ? 'alert' : 'status'} aria-live={toast.tone === 'error' ? 'assertive' : 'polite'}>{toast.tone === 'success' ? <Check size={18}/> : toast.tone === 'error' ? <CircleAlert size={18}/> : <Info size={18}/>} {toast.message}</div> : null}
   </>
 }

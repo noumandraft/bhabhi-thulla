@@ -54,6 +54,7 @@ export interface TableTalkLabels {
   send: string
   sending: string
   sendFailed: string
+  quickSendFailed: string
   charactersRemaining: (count: number) => string
   privacyHint: string
   playerControls: string
@@ -114,6 +115,7 @@ const DEFAULT_LABELS: TableTalkLabels = {
   send: 'Send message',
   sending: 'Sending…',
   sendFailed: 'Message could not be sent. Please try again.',
+  quickSendFailed: 'Reaction could not be sent. Please try again.',
   charactersRemaining: (count) => `${count} characters remaining`,
   privacyHint: 'Everyone seated at this table can read these messages.',
   playerControls: 'Player chat controls',
@@ -385,7 +387,7 @@ export function TableTalk({
     try {
       await onSendQuickReaction(reactionId)
     } catch {
-      setInternalError(labels.sendFailed)
+      setInternalError(labels.quickSendFailed)
     } finally {
       setSendingReactionId(null)
     }

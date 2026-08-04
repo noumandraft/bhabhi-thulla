@@ -50,6 +50,8 @@ export interface Player {
   ready: boolean
   isBot: boolean
   rematchReady: boolean
+  waitingForNextRound: boolean
+  joinedInRound: number
   reconnectGraceUsed: boolean
   /** Internal rollout bridge. Never include this capability flag in RoomView. */
   usesReadyProtocol: boolean
@@ -223,12 +225,16 @@ function tokenMatches(token: string, expectedHash: string): boolean {
 }
 
 function activePlayers(room: Room): Player[] {
-  return room.players.filter((player) => !player.escaped)
+  return room.players.filter((player) => !player.waitingForNextRound && !player.escaped)
 }
 
 function ensureConnectedHost(room: Room): void {
   const connectedHumans = room.players.filter((player) => player.connected && !player.isBot)
-  const nextHost = connectedHumans.find((player) => player.isHost) ?? connectedHumans[0]
+  const activeHumans = connectedHumans.filter((player) => !player.waitingForNextRound)
+  const nextHost = activeHumans.find((player) => player.isHost)
+    ?? activeHumans[0]
+    ?? connectedHumans.find((player) => player.isHost)
+    ?? connectedHumans[0]
   for (const player of room.players) player.isHost = player.id === nextHost?.id
 }
 
@@ -238,7 +244,7 @@ function nextActive(room: Room, playerId: string): Player | null {
   if (startIndex < 0) return null
   for (let offset = 1; offset <= room.players.length; offset += 1) {
     const candidate = room.players[(startIndex - offset + room.players.length) % room.players.length]
-    if (!candidate.escaped) return candidate
+    if (!candidate.waitingForNextRound && !candidate.escaped) return candidate
   }
   return null
 }
@@ -308,9 +314,14 @@ export class GameManager {
         ...player,
         socketId: null,
         connected: player.isBot,
+        hand: restored.status !== 'lobby' && Boolean(player.waitingForNextRound) ? [] : player.hand,
         usesReadyProtocol: player.usesReadyProtocol ?? false,
         ready: player.isBot || !(player.usesReadyProtocol ?? false) ? true : Boolean(player.ready),
         rematchReady: player.isBot || !(player.usesReadyProtocol ?? false) ? true : Boolean(player.rematchReady),
+        waitingForNextRound: restored.status !== 'lobby' && Boolean(player.waitingForNextRound),
+        joinedInRound: Number.isInteger(player.joinedInRound) && player.joinedInRound > 0
+          ? player.joinedInRound
+          : 1,
         reconnectGraceUsed: Boolean(player.reconnectGraceUsed),
       }))
       for (const player of restored.players) this.ensureScore(restored, player)
@@ -399,6 +410,8 @@ export class GameManager {
         ready: isBot || !usesReadyProtocol,
         isBot,
         rematchReady: isBot || !usesReadyProtocol,
+        waitingForNextRound: false,
+        joinedInRound: 1,
         reconnectGraceUsed: false,
         usesReadyProtocol,
       },
@@ -427,11 +440,21 @@ export class GameManager {
     const code = cleanCode(codeValue)
     const room = this.rooms.get(code)
     if (!room) throw new Error('Room not found. Check the code and try again.')
-    if (room.status !== 'lobby') throw new Error('This match has already started.')
     if (room.players.length >= 8) throw new Error('This room is full.')
     const { player, token } = this.makePlayer(name, socketId, false, false, usesReadyProtocol)
+    player.waitingForNextRound = room.status !== 'lobby'
+    player.joinedInRound = Math.max(1, room.session.roundNumber + 1)
     room.players.push(player)
     room.session.scores.push(newScore(player))
+    if (player.waitingForNextRound && room.game) {
+      addActivity(
+        room.game,
+        `${player.name} joined and will play in round ${player.joinedInRound}.`,
+        'good',
+        'connection',
+        { playerId: player.id, joinedInRound: player.joinedInRound },
+      )
+    }
     ensureConnectedHost(room)
     this.changed(room)
     return { room, credentials: { code, playerId: player.id, token } }
@@ -453,7 +476,9 @@ export class GameManager {
     player.socketId = socketId
     player.connected = true
     if (usesReadyProtocol === true) player.usesReadyProtocol = true
-    room.suspended = false
+    // A waiting spectator reconnecting to a restored room must not resume the
+    // current hand. Only a participant in that hand can reactivate its timers.
+    if (!player.waitingForNextRound) room.suspended = false
     ensureConnectedHost(room)
 
     const game = room.game
@@ -508,8 +533,11 @@ export class GameManager {
       leftDuringPlay: room.status === 'playing',
     }
 
-    if (room.status !== 'playing') {
+    if (room.status !== 'playing' || player.waitingForNextRound) {
       room.players = room.players.filter((candidate) => candidate.id !== player.id)
+      if (player.waitingForNextRound && player.joinedInRound > room.session.roundNumber) {
+        room.session.scores = room.session.scores.filter((score) => score.playerId !== player.id)
+      }
       ensureConnectedHost(room)
       if (!room.players.some((candidate) => !candidate.isBot)) {
         result.roomDeleted = true
@@ -596,11 +624,16 @@ export class GameManager {
   kickPlayer(roomCode: string, hostId: string, targetId: unknown): Player {
     const room = this.requireRoom(roomCode)
     this.requireHost(room, hostId)
-    if (room.status === 'playing') throw new Error('Players cannot be removed during a match.')
     if (typeof targetId !== 'string') throw new Error('Choose a player to remove.')
     const target = this.requirePlayer(room, targetId)
+    if (room.status === 'playing' && !target.waitingForNextRound) {
+      throw new Error('Only players waiting for the next round can be removed during a match.')
+    }
     if (target.id === hostId) throw new Error('The host cannot remove themselves.')
     room.players = room.players.filter((player) => player.id !== target.id)
+    if (target.waitingForNextRound && target.joinedInRound > room.session.roundNumber) {
+      room.session.scores = room.session.scores.filter((score) => score.playerId !== target.id)
+    }
     ensureConnectedHost(room)
     this.changed(room)
     return target
@@ -615,6 +648,9 @@ export class GameManager {
     const botCount = room.players.filter((player) => player.isBot).length + 1
     const name = nameValue === undefined || nameValue === '' ? `Bot ${botCount}` : nameValue
     const { player } = this.makePlayer(name, null, false, true)
+    player.joinedInRound = Math.max(1, room.session.roundNumber + 1)
+    player.waitingForNextRound = room.status === 'finished'
+    if (player.waitingForNextRound) player.rematchReady = true
     room.players.push(player)
     this.ensureScore(room, player)
     this.changed(room)
@@ -639,6 +675,7 @@ export class GameManager {
     if (!room.settings.allowBots) throw new Error('Bots are disabled for this room.')
     if (typeof targetId !== 'string') throw new Error('Choose a disconnected player.')
     const target = this.requirePlayer(room, targetId)
+    if (target.waitingForNextRound) throw new Error('That player is waiting for the next round and does not need a replacement.')
     if (target.isBot || target.connected) throw new Error('Only a disconnected player can be replaced.')
     target.isBot = true
     target.connected = true
@@ -660,8 +697,12 @@ export class GameManager {
 
   setRematchReady(roomCode: string, playerId: string, value: unknown): void {
     const room = this.requireRoom(roomCode)
-    if (room.status !== 'finished') throw new Error('The current round has not finished.')
     const player = this.requirePlayer(room, playerId)
+    const canReadyForNextRound = room.status === 'finished'
+      || (room.status === 'playing' && player.waitingForNextRound)
+    if (!canReadyForNextRound) {
+      throw new Error('Only players waiting for the next round can change rematch readiness during play.')
+    }
     if (player.isBot) throw new Error('Bots are always ready.')
     if (typeof value !== 'boolean') throw new Error('Rematch status must be true or false.')
     player.rematchReady = value
@@ -673,6 +714,7 @@ export class GameManager {
     this.requireHost(room, hostId)
     if (room.status === 'playing') throw new Error('The scoreboard cannot be reset during a match.')
     room.session.roundNumber = 0
+    for (const player of room.players) player.joinedInRound = 1
     room.session.scores = room.players.map(newScore)
     this.changed(room)
   }
@@ -768,8 +810,24 @@ export class GameManager {
     const blockReason = this.startBlockReason(room)
     if (blockReason) throw new Error(blockReason)
 
+    const droppedFutureSeats = new Set(
+      room.players
+        .filter((player) => (
+          player.waitingForNextRound
+          && !player.isBot
+          && !player.connected
+          && player.joinedInRound > room.session.roundNumber
+        ))
+        .map((player) => player.id),
+    )
+    if (droppedFutureSeats.size) {
+      room.session.scores = room.session.scores.filter((score) => (
+        !droppedFutureSeats.has(score.playerId) || score.roundsPlayed > 0
+      ))
+    }
     room.players = room.players.filter((player) => player.isBot || player.connected)
     room.players.forEach((player) => {
+      player.waitingForNextRound = false
       player.hand = []
       player.escaped = false
       player.ready = player.isBot || !player.usesReadyProtocol
@@ -1024,7 +1082,7 @@ export class GameManager {
 
   private escapeEmptyPlayers(room: Room, exceptPlayerId: string): void {
     for (const player of room.players) {
-      if (!player.escaped && player.id !== exceptPlayerId && player.hand.length === 0) this.markEscaped(room, player)
+      if (!player.waitingForNextRound && !player.escaped && player.id !== exceptPlayerId && player.hand.length === 0) this.markEscaped(room, player)
     }
   }
 
@@ -1053,7 +1111,13 @@ export class GameManager {
     const loser = this.requirePlayer(room, loserId)
     addActivity(game, `${loser.name} is the Bhabhi!`, 'warning', 'round', { loserId })
     this.recordScore(room, loserId)
-    for (const player of room.players) player.rematchReady = player.isBot || !player.usesReadyProtocol
+    for (const player of room.players) {
+      if (player.waitingForNextRound) {
+        player.rematchReady = player.isBot || !player.usesReadyProtocol || player.rematchReady
+      } else {
+        player.rematchReady = player.isBot || !player.usesReadyProtocol
+      }
+    }
     ensureConnectedHost(room)
   }
 
@@ -1131,6 +1195,7 @@ export class GameManager {
       && game.currentTurnId === viewerId
       && !game.takeUsedForLead
       && !viewer.escaped
+      && !viewer.waitingForNextRound
       && activePlayers(room).length > 1,
     )
     const takeTarget = canTakeRightHand ? nextActive(room, viewerId) : null
@@ -1149,7 +1214,7 @@ export class GameManager {
       players: room.players.map((player) => ({
         id: player.id,
         name: player.name,
-        cardCount: player.hand.length,
+        cardCount: player.waitingForNextRound ? 0 : player.hand.length,
         connected: player.connected,
         escaped: player.escaped,
         isHost: player.isHost,
@@ -1157,14 +1222,16 @@ export class GameManager {
         ready: player.ready,
         isBot: player.isBot,
         rematchReady: player.rematchReady,
+        waitingForNextRound: player.waitingForNextRound,
+        joinedInRound: player.joinedInRound,
         reconnecting: game?.phase === 'waiting_for_reconnect' && game.reconnectPlayerId === player.id,
         reconnectEndsAt: game?.phase === 'waiting_for_reconnect' && game.reconnectPlayerId === player.id ? game.reconnectEndsAt : null,
       })),
       game: game
         ? {
             phase: game.phase,
-            hand: viewer.hand,
-            legalCardIds: this.legalCards(room, viewerId).map((card) => card.id),
+            hand: viewer.waitingForNextRound ? [] : viewer.hand,
+            legalCardIds: viewer.waitingForNextRound ? [] : this.legalCards(room, viewerId).map((card) => card.id),
             trick: game.trick.map((entry) => ({
               playerId: entry.playerId,
               playerName: room.players.find((player) => player.id === entry.playerId)?.name ?? 'Player',

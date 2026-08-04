@@ -11,6 +11,7 @@ A mobile-first, real-time multiplayer version of the Pakistani/Punjabi card game
 ## Player experience
 
 - Private five-character room codes with no signup
+- Friends can join an active room with the same code, watch the public table, confirm they are ready, and take a seat on the next deal without changing the current hand
 - Three to eight human or bot players using one 52-card deck
 - Practice mode that immediately starts a game with two bots
 - Server-authoritative shuffle, legal moves, turns, timers and results
@@ -56,12 +57,13 @@ npm start
 With `npm run dev` already running, `npm run qa:visual` creates a real eight-player match and verifies:
 
 - Mobile landing CTA placement
-- Lobby, resolving, reconnect and finished-scoreboard fixtures at 390×844 and 844×390
+- Lobby, late-join waiting/readiness, resolving, reconnect and maximum-capacity finished-scoreboard fixtures at 390×844 and 844×390
 - A real three-second server resolution phase
 - Completed-card visibility and final-card emphasis
 - Paused timer during resolution and a fresh timer afterward
 - Desktop 1440×900, mobile 375×812 and landscape 844×390 gameplay
 - Open Table Talk drawer/sheet layout on desktop, phone portrait and phone landscape
+- Short-laptop gameplay, chat and results at 1366×600
 - Horizontal overflow, 44px touch targets, accessible names, duplicate IDs, display-card semantics, reduced motion and console errors
 
 Screenshots and `visual-qa-report.json` are written to `design/qa/`.
@@ -149,6 +151,7 @@ After deployment, verify in order:
 7. Refresh restores the same seat.
 8. Temporarily going offline shows the reconnect notice without exposing stale match state.
 9. Phone portrait and landscape have no page-level horizontal overflow.
+10. A fourth device can join an active three-player room, sees no private hands, marks itself ready, and is included only when the next round is dealt.
 
 ## Rules implemented
 

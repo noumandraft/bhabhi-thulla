@@ -35,6 +35,10 @@ export interface PlayerView {
   ready: boolean
   isBot: boolean
   rematchReady: boolean
+  /** True while this seat is observing the current hand and waiting for the next deal. */
+  waitingForNextRound: boolean
+  /** The first session round this seat is eligible to play. */
+  joinedInRound: number
   reconnecting: boolean
   reconnectEndsAt: number | null
 }

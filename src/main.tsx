@@ -1,6 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import { translate, type Language, type TranslationKey } from './i18n'
 import './styles.css'
 
 declare const __APP_VERSION__: string
@@ -8,6 +9,15 @@ declare const __BUILD_COMMIT__: string
 
 const noticeRegion = document.getElementById('platform-notices')
 let updateReloadRequested = false
+let updateNoticeTimer: number | null = null
+const UPDATE_SNOOZE_KEY = 'thulla:update-snoozed-until'
+const UPDATE_SNOOZE_MS = 30 * 60 * 1_000
+
+function platformText(key: TranslationKey): string {
+  const saved = localStorage.getItem('thulla:language')
+  const language: Language = saved === 'roman' || saved === 'ur' ? saved : 'en'
+  return translate(language, key)
+}
 
 function setOfflineNotice(offline: boolean) {
   if (!noticeRegion) return
@@ -26,13 +36,22 @@ function setOfflineNotice(offline: boolean) {
     <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20">
       <path d="M3 3l18 18M8.5 8.6A7 7 0 0 1 19 11m-4.3 4.1A4 4 0 0 0 8.8 14M5 11a10 10 0 0 1 1.5-2.4M12 19h.01" />
     </svg>
-    <span><strong>You’re offline.</strong> Your table will reconnect when your internet returns.</span>
+    <span><strong>${platformText('offlineTitle')}</strong> ${platformText('offlineBody')}</span>
   `
   noticeRegion.append(notice)
 }
 
 function showUpdateNotice(registration: ServiceWorkerRegistration) {
   if (!noticeRegion || document.getElementById('update-notice')) return
+  const snoozedUntil = Number(sessionStorage.getItem(UPDATE_SNOOZE_KEY) ?? 0)
+  if (Number.isFinite(snoozedUntil) && snoozedUntil > Date.now()) {
+    if (updateNoticeTimer !== null) window.clearTimeout(updateNoticeTimer)
+    updateNoticeTimer = window.setTimeout(() => {
+      updateNoticeTimer = null
+      if (registration.waiting) showUpdateNotice(registration)
+    }, snoozedUntil - Date.now() + 100)
+    return
+  }
 
   const notice = document.createElement('div')
   notice.id = 'update-notice'
@@ -40,23 +59,28 @@ function showUpdateNotice(registration: ServiceWorkerRegistration) {
   notice.setAttribute('role', 'status')
   notice.innerHTML = `
     <div class="platform-notice__copy">
-      <strong>A game update is ready</strong>
-      <span>Update when it is safe to reconnect to your seat.</span>
+      <strong>${platformText('updateTitle')}</strong>
+      <span>${platformText('updateBody')}</span>
     </div>
     <div class="platform-notice__actions">
-      <button type="button" data-update-now>Update &amp; reconnect</button>
-      <button type="button" class="platform-notice__later" data-update-later>Later</button>
+      <button type="button" data-update-now>${platformText('updateNow')}</button>
+      <button type="button" class="platform-notice__later" data-update-later>${platformText('later')}</button>
     </div>
   `
 
   notice.querySelector<HTMLButtonElement>('[data-update-now]')?.addEventListener('click', () => {
     const waitingWorker = registration.waiting
     if (!waitingWorker) return
+    sessionStorage.removeItem(UPDATE_SNOOZE_KEY)
     updateReloadRequested = true
     notice.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = true })
     waitingWorker.postMessage({ type: 'SKIP_WAITING' })
   })
-  notice.querySelector<HTMLButtonElement>('[data-update-later]')?.addEventListener('click', () => notice.remove())
+  notice.querySelector<HTMLButtonElement>('[data-update-later]')?.addEventListener('click', () => {
+    sessionStorage.setItem(UPDATE_SNOOZE_KEY, String(Date.now() + UPDATE_SNOOZE_MS))
+    notice.remove()
+    showUpdateNotice(registration)
+  })
   noticeRegion.append(notice)
 }
 
@@ -83,8 +107,10 @@ function registerServiceWorker() {
         })
       })
 
-      const checkForUpdate = () => {
-        if (document.visibilityState === 'visible') registration.update().catch(() => undefined)
+      const checkForUpdate = async () => {
+        if (document.visibilityState !== 'visible') return
+        await registration.update().catch(() => undefined)
+        if (registration.waiting) showUpdateNotice(registration)
       }
       window.setInterval(checkForUpdate, 30 * 60 * 1000)
       document.addEventListener('visibilitychange', checkForUpdate)

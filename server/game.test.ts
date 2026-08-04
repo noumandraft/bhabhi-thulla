@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RECONNECT_GRACE_MS, TRICK_RESOLUTION_MS, type Card } from '../shared/game.js'
-import { GameManager, type Room } from './game.js'
+import { GameManager, type Room, type RoomPersistence } from './game.js'
 
 function readyEveryone(manager: GameManager, room: Room): void {
   for (const player of room.players) if (!player.isBot) manager.setReady(room.code, player.id, true)
@@ -27,7 +27,7 @@ function rightOf(room: Room, playerId: string) {
   const start = room.players.findIndex((player) => player.id === playerId)
   for (let offset = 1; offset <= room.players.length; offset += 1) {
     const player = room.players[(start - offset + room.players.length) % room.players.length]
-    if (!player.escaped) return player
+    if (!player.waitingForNextRound && !player.escaped) return player
   }
   throw new Error('No right-hand player')
 }
@@ -407,6 +407,207 @@ describe('lobby, bots, reconnection and sessions', () => {
     expect(manager.view(room, credentials[0].playerId).canStart).toBe(true)
     manager.startGame(room.code, credentials[0].playerId)
     expect(room).toMatchObject({ status: 'playing', session: { roundNumber: 2 } })
+  })
+
+  it('queues a late joiner without changing the active hand or anticlockwise order', () => {
+    const { manager, room } = setupGame(3)
+    const roundPlayerIds = [...room.game!.roundPlayerIds]
+    const active = [...room.players]
+    const leader = active[0]
+    const expectedNext = active[2]
+    leader.hand = [
+      { id: 'hearts-2', suit: 'hearts', rank: '2' },
+      { id: 'clubs-2', suit: 'clubs', rank: '2' },
+    ]
+    Object.assign(room.game!, {
+      phase: 'turn', firstTrick: false, trick: [], leadSuit: null,
+      currentTurnId: leader.id, leaderId: leader.id, takeUsedForLead: true,
+    })
+
+    const joined = manager.joinRoom(room.code, 'Late Friend', 'socket-late')
+    const waiting = room.players.find((player) => player.id === joined.credentials.playerId)!
+    expect(waiting).toMatchObject({
+      hand: [], waitingForNextRound: true, joinedInRound: 2, connected: true, rematchReady: false,
+    })
+    expect(() => manager.setRematchReady(room.code, active[1].id, true)).toThrow(
+      'Only players waiting for the next round',
+    )
+    manager.setRematchReady(room.code, waiting.id, true)
+    expect(waiting.rematchReady).toBe(true)
+    const legacyWaiting = manager.joinRoom(room.code, 'Legacy Late Friend', 'socket-legacy-late', false).room.players.at(-1)!
+    expect(legacyWaiting).toMatchObject({ waitingForNextRound: true, rematchReady: true })
+    expect(room.game!.roundPlayerIds).toEqual(roundPlayerIds)
+    expect(room.session.scores.find((score) => score.playerId === waiting.id)).toMatchObject({
+      roundsPlayed: 0, escapes: 0, bhabhiCount: 0,
+    })
+
+    const waitingView = manager.view(room, waiting.id)
+    expect(waitingView.players.find((player) => player.id === waiting.id)).toMatchObject({
+      cardCount: 0, waitingForNextRound: true, joinedInRound: 2,
+    })
+    expect(waitingView.game).toMatchObject({ hand: [], legalCardIds: [], canTakeRightHand: false })
+    expect(() => manager.playCard(room.code, waiting.id, 'hearts-2')).toThrow('Wait for your turn')
+
+    manager.playCard(room.code, leader.id, 'hearts-2')
+    expect(room.game!.currentTurnId).toBe(expectedNext.id)
+    expect(room.game!.trick.map((entry) => entry.playerId)).toEqual([leader.id])
+    expect(waiting).toMatchObject({ hand: [], escaped: false, waitingForNextRound: true })
+  })
+
+  it('counts waiting seats toward capacity and lets them reconnect or leave cleanly', () => {
+    const { manager, room } = setupGame(3)
+    let lastCredentials
+    for (let index = 3; index < 8; index += 1) {
+      lastCredentials = manager.joinRoom(room.code, `Late Player ${index}`, `socket-${index}`).credentials
+    }
+    expect(room.players).toHaveLength(8)
+    expect(room.players.filter((player) => player.waitingForNextRound)).toHaveLength(5)
+    expect(() => manager.joinRoom(room.code, 'Ninth Player', 'socket-8')).toThrow('room is full')
+
+    const waiting = room.players.find((player) => player.id === lastCredentials!.playerId)!
+    manager.disconnect('socket-7')
+    expect(waiting).toMatchObject({ connected: false, socketId: null, waitingForNextRound: true })
+    manager.reconnectRoom(room.code, lastCredentials!.token, 'socket-7-returned')
+    expect(waiting).toMatchObject({ connected: true, socketId: 'socket-7-returned', waitingForNextRound: true })
+
+    const leaveResult = manager.leaveRoom(room.code, waiting.id, 'socket-7-returned')
+    expect(leaveResult).toMatchObject({ roomDeleted: false, leftDuringPlay: true })
+    expect(room.players.some((player) => player.id === waiting.id)).toBe(false)
+    expect(room.session.scores.some((score) => score.playerId === waiting.id)).toBe(false)
+    expect(room.game!.roundPlayerIds).toHaveLength(3)
+  })
+
+  it('allows the host to remove only queued seats during play', () => {
+    const { manager, room, credentials } = setupGame(3)
+    const activeTarget = room.players[1]
+    const joined = manager.joinRoom(room.code, 'Waiting Friend', 'socket-waiting')
+    const waiting = room.players.find((player) => player.id === joined.credentials.playerId)!
+
+    expect(() => manager.kickPlayer(room.code, credentials[0].playerId, activeTarget.id)).toThrow(
+      'Only players waiting for the next round',
+    )
+    expect(manager.kickPlayer(room.code, credentials[0].playerId, waiting.id)).toBe(waiting)
+    expect(room.players.some((player) => player.id === waiting.id)).toBe(false)
+    expect(room.session.scores.some((score) => score.playerId === waiting.id)).toBe(false)
+  })
+
+  it('prefers an active player over a waiting spectator when host ownership transfers', () => {
+    const { manager, room } = setupGame(3)
+    const originalHost = room.players.find((player) => player.isHost)!
+    const activeCandidate = room.players.find((player) => player.id !== originalHost.id)!
+    const waiting = manager.joinRoom(room.code, 'Waiting Host Candidate', 'socket-wait-host').room.players.at(-1)!
+
+    manager.disconnect(originalHost.socketId!)
+
+    expect(activeCandidate.isHost).toBe(true)
+    expect(waiting).toMatchObject({ waitingForNextRound: true, isHost: false })
+  })
+
+  it('queues joins made between rounds, promotes them, and scores their first round exactly once', async () => {
+    const { manager, room, credentials } = setupGame(3)
+    room.status = 'finished'
+    const joined = manager.joinRoom(room.code, 'Round Two Friend', 'socket-round-two')
+    const waiting = room.players.find((player) => player.id === joined.credentials.playerId)!
+    expect(waiting).toMatchObject({ waitingForNextRound: true, joinedInRound: 2, hand: [], rematchReady: false })
+
+    for (const player of room.players) {
+      if (!player.waitingForNextRound) manager.setRematchReady(room.code, player.id, true)
+    }
+    expect(manager.view(room, credentials[0].playerId)).toMatchObject({
+      canStart: false,
+      startBlockReason: expect.stringContaining('Round Two Friend'),
+    })
+    manager.setRematchReady(room.code, waiting.id, true)
+    expect(manager.view(room, credentials[0].playerId).canStart).toBe(true)
+    manager.startGame(room.code, credentials[0].playerId)
+
+    expect(room).toMatchObject({ status: 'playing', session: { roundNumber: 2 } })
+    expect(waiting).toMatchObject({ waitingForNextRound: false, joinedInRound: 2, escaped: false })
+    expect(waiting.hand.length).toBeGreaterThan(0)
+    expect(room.players.reduce((total, player) => total + player.hand.length, 0)).toBe(52)
+    expect(room.game!.roundPlayerIds).toContain(waiting.id)
+    expect(room.session.scores.find((score) => score.playerId === waiting.id)?.roundsPlayed).toBe(0)
+
+    const follower = rightOf(room, waiting.id)
+    const escaped = room.players.filter((player) => player.id !== waiting.id && player.id !== follower.id)
+    for (const player of escaped) {
+      player.escaped = true
+      player.hand = []
+    }
+    room.game!.roundEscapeOrder = escaped.map((player) => player.id)
+    Object.assign(room.game!, {
+      phase: 'turn', firstTrick: false, trick: [], leadSuit: null,
+      currentTurnId: waiting.id, resolvedTrick: null, resolutionEndsAt: null,
+    })
+    waiting.hand = [{ id: 'hearts-A', suit: 'hearts', rank: 'A' }]
+    follower.hand = [{ id: 'hearts-K', suit: 'hearts', rank: 'K' }]
+    manager.playCard(room.code, waiting.id, 'hearts-A')
+    manager.playCard(room.code, follower.id, 'hearts-K')
+    await vi.advanceTimersByTimeAsync(TRICK_RESOLUTION_MS)
+
+    expect(room.status).toBe('finished')
+    expect(room.session.scores.find((score) => score.playerId === waiting.id)).toMatchObject({
+      roundsPlayed: 1, bhabhiCount: 1,
+    })
+  })
+
+  it('keeps a restored match suspended when only a waiting spectator reconnects', async () => {
+    const { manager, room, credentials } = setupGame(3)
+    const late = manager.joinRoom(room.code, 'Restored Spectator', 'socket-restored-waiting')
+    const snapshot = structuredClone(room)
+    const persistence: RoomPersistence = {
+      async initialize() {},
+      async loadAll() { return [snapshot] },
+      async save() {},
+      async delete() {},
+      status() { return { mode: 'test', durable: true, ready: true } },
+    }
+    const restoredManager = new GameManager(persistence)
+    await restoredManager.initialize()
+    const restoredRoom = restoredManager.rooms.get(room.code)!
+    expect(restoredRoom.suspended).toBe(true)
+
+    restoredManager.reconnectRoom(room.code, late.credentials.token, 'socket-waiting-returned')
+    expect(restoredRoom.suspended).toBe(true)
+
+    restoredManager.reconnectRoom(room.code, credentials[0].token, 'socket-active-returned')
+    expect(restoredRoom.suspended).toBe(false)
+    await manager.close()
+    await restoredManager.close()
+  })
+
+  it('drops disconnected future seats and their zero-score entries before the next deal', () => {
+    const { manager, room, credentials } = setupGame(3)
+    room.status = 'finished'
+    const late = manager.joinRoom(room.code, 'Missing Next Round', 'socket-missing-next')
+    manager.disconnect('socket-missing-next')
+    for (const player of room.players) {
+      if (!player.waitingForNextRound) manager.setRematchReady(room.code, player.id, true)
+    }
+
+    manager.startGame(room.code, credentials[0].playerId)
+
+    expect(room.players.some((player) => player.id === late.credentials.playerId)).toBe(false)
+    expect(room.session.scores.some((score) => score.playerId === late.credentials.playerId)).toBe(false)
+    expect(room.game!.roundPlayerIds).not.toContain(late.credentials.playerId)
+  })
+
+  it('queues a bot added between rounds and promotes it with the next deal', () => {
+    const { manager, room, credentials } = setupGame(3)
+    room.status = 'finished'
+    const bot = manager.addBot(room.code, credentials[0].playerId, 'Next Round Bot')
+    expect(bot).toMatchObject({
+      isBot: true, waitingForNextRound: true, joinedInRound: 2, rematchReady: true, hand: [],
+    })
+    for (const player of room.players) {
+      if (!player.waitingForNextRound && !player.isBot) manager.setRematchReady(room.code, player.id, true)
+    }
+
+    manager.startGame(room.code, credentials[0].playerId)
+
+    expect(bot.waitingForNextRound).toBe(false)
+    expect(bot.hand.length).toBeGreaterThan(0)
+    expect(room.game!.roundPlayerIds).toContain(bot.id)
   })
 
   it('creates structured allowlisted reactions', () => {

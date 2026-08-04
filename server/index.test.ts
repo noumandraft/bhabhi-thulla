@@ -171,6 +171,65 @@ describe('Socket.IO server protocol', () => {
     expect(gameServer.manager.rooms.has(created.data!.code)).toBe(false)
   })
 
+  it('accepts a socket into an active room as a next-round seat', async () => {
+    gameServer = await createGameServer({
+      ...process.env,
+      NODE_ENV: 'test',
+      CLIENT_ORIGIN: 'http://localhost:5173',
+      REDIS_URL: '',
+    })
+    const port = await gameServer.listen(0)
+    const url = `http://127.0.0.1:${port}`
+    sockets.push(
+      await connectedSocket(url),
+      await connectedSocket(url),
+      await connectedSocket(url),
+      await connectedSocket(url),
+    )
+
+    const created = await emitAck<RoomCredentials>(sockets[0], 'room:create', { name: 'Queue Host' })
+    const first = await emitAck<RoomCredentials>(sockets[1], 'room:join', {
+      code: created.data!.code, name: 'First Player',
+    })
+    await emitAck<RoomCredentials>(sockets[2], 'room:join', {
+      code: created.data!.code, name: 'Second Player',
+    })
+    for (const socket of sockets.slice(0, 3)) {
+      expect((await emitAck(socket, 'room:ready', { ready: true })).ok).toBe(true)
+    }
+    expect((await emitAck(sockets[0], 'game:start', {})).ok).toBe(true)
+
+    const late = await emitAck<RoomCredentials>(sockets[3], 'room:join', {
+      code: created.data!.code, name: 'Late Friend',
+    })
+    expect(late.ok).toBe(true)
+    const room = gameServer.manager.rooms.get(created.data!.code)!
+    const lateView = gameServer.manager.view(room, late.data!.playerId)
+    expect(lateView).toMatchObject({
+      status: 'playing',
+      yourPlayerId: late.data!.playerId,
+      game: { hand: [], legalCardIds: [], canTakeRightHand: false },
+    })
+    expect(lateView.players.find((player) => player.id === late.data!.playerId)).toMatchObject({
+      waitingForNextRound: true, joinedInRound: 2, rematchReady: false, cardCount: 0,
+    })
+    expect(await emitAck(sockets[1], 'game:rematch-ready', { ready: true })).toMatchObject({
+      ok: false, error: expect.stringContaining('waiting for the next round'),
+    })
+    expect((await emitAck(sockets[3], 'game:rematch-ready', { ready: true })).ok).toBe(true)
+    expect(gameServer.manager.view(room, late.data!.playerId).players.find(
+      (player) => player.id === late.data!.playerId,
+    )?.rematchReady).toBe(true)
+
+    expect(await emitAck(sockets[0], 'room:kick', { playerId: first.data!.playerId })).toMatchObject({
+      ok: false, error: expect.stringContaining('waiting for the next round'),
+    })
+    const kicked = new Promise<{ code: string }>((fulfill) => sockets[3].once('room:kicked', fulfill))
+    expect((await emitAck(sockets[0], 'room:kick', { playerId: late.data!.playerId })).ok).toBe(true)
+    expect(await kicked).toEqual({ code: created.data!.code })
+    expect(room.players.some((player) => player.id === late.data!.playerId)).toBe(false)
+  })
+
   it('lets legacy sockets start and rematch without ready events while v2 remains explicit', async () => {
     gameServer = await createGameServer({
       ...process.env,

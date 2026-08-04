@@ -191,9 +191,32 @@ const diagnosticsExpression = `(() => {
   const tableTalkComposerRect = tableTalkComposer?.getBoundingClientRect()
   const tableTalkTextareaRect = tableTalkDrawer?.querySelector('textarea')?.getBoundingClientRect()
   const tableTalkSendRect = tableTalkDrawer?.querySelector('.table-talk__send')?.getBoundingClientRect()
+  const platformNotice = document.querySelector('.platform-notice')
+  const platformNoticeRect = platformNotice?.getBoundingClientRect()
   const tableTalkTrigger = document.querySelector('.table-talk__trigger')
+  const tableTalkTriggerLabel = tableTalkTrigger?.querySelector('.table-talk__trigger-label')
   const currentTrick = document.querySelector('.game-v2-trick')
   const currentTrickRect = currentTrick?.getBoundingClientRect()
+  const waitingStrip = document.querySelector('.game-v2-waiting-strip')
+  const waitingStripRect = waitingStrip?.getBoundingClientRect()
+  const leadPillRect = document.querySelector('.game-v2-lead')?.getBoundingClientRect()
+  const matchLogRect = document.querySelector('.game-v2-log-toggle')?.getBoundingClientRect()
+  const tableTalkTriggerRect = tableTalkTrigger?.getBoundingClientRect()
+  const clock = document.querySelector('.game-v2-clock, .turn-clock')
+  const clockStyle = clock ? getComputedStyle(clock) : null
+  const parseRgb = (value) => (value?.match(/-?\\d*\\.?\\d+/g) ?? []).slice(0, 3).map(Number)
+  const relativeLuminance = (value) => {
+    const channels = parseRgb(value).map((channel) => {
+      const normalized = channel / 255
+      return normalized <= .04045 ? normalized / 12.92 : ((normalized + .055) / 1.055) ** 2.4
+    })
+    return channels.length === 3 ? .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2] : null
+  }
+  const clockForeground = relativeLuminance(clockStyle?.color)
+  const clockBackground = relativeLuminance(clockStyle?.backgroundColor)
+  const clockContrast = clockForeground === null || clockBackground === null
+    ? null
+    : (Math.max(clockForeground, clockBackground) + .05) / (Math.min(clockForeground, clockBackground) + .05)
   const fullyInside = (inner, outer) => Boolean(inner && outer
     && inner.left >= outer.left - 1
     && inner.top >= outer.top - 1
@@ -210,6 +233,9 @@ const diagnosticsExpression = `(() => {
     && thullaStatusRect.right > lastCardRect.left
     && thullaStatusRect.top < lastCardRect.bottom
     && thullaStatusRect.bottom > lastCardRect.top)
+  const overlaps = (first, second) => Boolean(first && second
+    && first.left < second.right && first.right > second.left
+    && first.top < second.bottom && first.bottom > second.top)
   return {
     viewport: [innerWidth, innerHeight],
     pageOverflowX: root.scrollWidth > innerWidth + 1,
@@ -230,13 +256,30 @@ const diagnosticsExpression = `(() => {
     tableTalkComposerFullyVisible: fullyInside(tableTalkComposerRect, tableTalkDrawerRect),
     tableTalkTextareaFullyVisible: fullyInside(tableTalkTextareaRect, tableTalkDrawerRect),
     tableTalkSendFullyVisible: fullyInside(tableTalkSendRect, tableTalkDrawerRect),
+    platformNoticeVisible: Boolean(platformNotice && visible(platformNotice)),
+    platformNoticeFullyVisible: Boolean(platformNoticeRect
+      && platformNoticeRect.left >= -1 && platformNoticeRect.top >= -1
+      && platformNoticeRect.right <= innerWidth + 1 && platformNoticeRect.bottom <= innerHeight + 1),
     tableTalkTriggerVisible: Boolean(tableTalkTrigger && visible(tableTalkTrigger)),
+    tableTalkLabelVisible: Boolean(tableTalkTriggerLabel && visible(tableTalkTriggerLabel)),
     tableTalkOverlapsCurrentTrick: Boolean(tableTalkDrawerRect && currentTrickRect
       && tableTalkDrawerRect.left < currentTrickRect.right
       && tableTalkDrawerRect.right > currentTrickRect.left
       && tableTalkDrawerRect.top < currentTrickRect.bottom
       && tableTalkDrawerRect.bottom > currentTrickRect.top),
-    clockVisible: Boolean(document.querySelector('.game-v2-clock, .turn-clock')),
+    clockVisible: Boolean(clock && visible(clock)),
+    clockColor: clockStyle?.color ?? null,
+    clockBackgroundColor: clockStyle?.backgroundColor ?? null,
+    clockContrast,
+    waitingPanelVisible: Boolean(document.querySelector('.game-v2-waiting-player')),
+    waitingStripVisible: Boolean(waitingStrip),
+    waitingStripOverlapsLead: overlaps(waitingStripRect, leadPillRect),
+    waitingStripOverlapsMatchLog: overlaps(waitingStripRect, matchLogRect),
+    waitingStripOverlapsTableTalk: overlaps(waitingStripRect, tableTalkTriggerRect),
+    waitingRemoveControls: document.querySelectorAll('.game-v2-remove-waiting').length,
+    waitingReadyControlVisible: Boolean(document.querySelector('.game-v2-waiting-player .game-v2-button') && visible(document.querySelector('.game-v2-waiting-player .game-v2-button'))),
+    matchLogText: document.querySelector('.game-v2-activity')?.textContent?.trim().replace(/\s+/g, ' ') ?? '',
+    handVisible: Boolean(document.querySelector('.game-v2-hand') && visible(document.querySelector('.game-v2-hand'))),
     liveReactionVisible: Boolean(document.querySelector('.game-v2-live-reaction')),
     emptyTrickVisible: Boolean(document.querySelector('.game-v2-empty-trick')),
     focusableDisplayCards: document.querySelectorAll('.game-v2-trick button, .game-v2-waste button, .waste-stack button, .current-trick button').length,
@@ -345,12 +388,28 @@ try {
   assert(landing.touchViolations.length === 0, `The mobile landing page has touch targets under 44px: ${JSON.stringify(landing.touchViolations)}`)
   assert(landing.unnamedControls.length === 0, 'The mobile landing page has unnamed interactive controls.')
 
+  await evaluate(cdp, `(() => {
+    const region = document.getElementById('platform-notices')
+    if (!region) return false
+    region.innerHTML = '<div class="platform-notice platform-notice--update" role="status"><div class="platform-notice__copy"><strong>Game update ready</strong><span>Update when it is safe to reconnect.</span></div><div class="platform-notice__actions"><button type="button">Update & reconnect</button><button type="button" class="platform-notice__later">Later</button></div></div>'
+    return true
+  })()`)
+  const platformNotice = await capture(cdp, 'platform-notice-mobile', 390, 844)
+  assert(platformNotice.platformNoticeVisible, 'The mobile platform notice is not visible.')
+  assert(platformNotice.platformNoticeFullyVisible, 'The mobile platform notice is clipped by the viewport.')
+  assert(platformNotice.touchViolations.length === 0, `The platform notice has touch targets under 44px: ${JSON.stringify(platformNotice.touchViolations)}`)
+  assert(platformNotice.unnamedControls.length === 0, 'The platform notice has unnamed controls.')
+  await evaluate(cdp, `document.getElementById('platform-notices')?.replaceChildren()`)
+
   const fixtureDefinitions = [
     { mode: 'lobby', selector: '.lobby-shell' },
     { mode: 'playing', selector: '.game-v2-shell' },
+    { mode: 'queued', selector: '.game-v2-waiting-strip' },
+    { mode: 'waiting', selector: '.game-v2-waiting-player' },
     { mode: 'resolving', selector: '.game-v2-resolution' },
     { mode: 'reconnect', selector: '.game-v2-reconnect-banner' },
     { mode: 'finished', selector: '.game-v2-result' },
+    { mode: 'finished-waiting', selector: '.game-v2-result__waiting' },
   ]
   const fixtureResults = {}
   for (const fixture of fixtureDefinitions) {
@@ -363,6 +422,9 @@ try {
     const portrait = await captureFreshFixture(`fixture-${fixture.mode}-mobile`, 390, 844)
     const landscape = await captureFreshFixture(`fixture-${fixture.mode}-landscape`, 844, 390)
     const desktop = fixture.mode === 'resolving' ? await captureFreshFixture(`fixture-${fixture.mode}-desktop`, 1366, 768) : null
+    const shortDesktop = ['playing', 'waiting', 'finished', 'finished-waiting'].includes(fixture.mode)
+      ? await captureFreshFixture(`fixture-${fixture.mode}-short-desktop`, 1366, 600)
+      : null
     let chatOpen = null
     if (fixture.mode === 'playing') {
       await evaluate(cdp, `document.querySelector('.table-talk__trigger')?.click()`)
@@ -371,10 +433,11 @@ try {
         portrait: await capture(cdp, 'fixture-playing-chat-open-mobile', 390, 844),
         landscape: await capture(cdp, 'fixture-playing-chat-open-landscape', 844, 390),
         desktop: await capture(cdp, 'fixture-playing-chat-open-desktop', 1366, 768),
+        shortDesktop: await capture(cdp, 'fixture-playing-chat-open-short-desktop', 1366, 600),
       }
     }
-    fixtureResults[fixture.mode] = { portrait, landscape, desktop, chatOpen }
-    for (const result of [portrait, landscape, desktop].filter(Boolean)) {
+    fixtureResults[fixture.mode] = { portrait, landscape, desktop, shortDesktop, chatOpen }
+    for (const result of [portrait, landscape, desktop, shortDesktop].filter(Boolean)) {
       assert(!result.pageOverflowX, `${fixture.mode} fixture has horizontal overflow at ${result.viewport.join('x')}.`)
       assert(result.touchViolations.length === 0, `${fixture.mode} fixture has touch targets under 44px at ${result.viewport.join('x')}: ${JSON.stringify(result.touchViolations)}`)
       assert(result.unnamedControls.length === 0, `${fixture.mode} fixture has unnamed controls at ${result.viewport.join('x')}.`)
@@ -408,6 +471,25 @@ try {
   assert(!fixtureResults.finished.portrait.tableTalkTriggerVisible, 'Table Talk remains interactive outside the finished-round modal.')
   assert(!fixtureResults.resolving.portrait.clockVisible, 'The resolving fixture displays a running timer.')
   assert(!fixtureResults.reconnect.portrait.clockVisible, 'The reconnect fixture displays a running timer.')
+  assert((fixtureResults.playing.portrait.clockContrast ?? 0) >= 4.5, `The portrait turn clock contrast is below 4.5:1 (${fixtureResults.playing.portrait.clockContrast?.toFixed(2)}).`)
+  assert((fixtureResults.playing.shortDesktop.clockContrast ?? 0) >= 4.5, `The short-desktop turn clock contrast is below 4.5:1 (${fixtureResults.playing.shortDesktop.clockContrast?.toFixed(2)}).`)
+  assert(fixtureResults.waiting.portrait.waitingPanelVisible, 'A late-joining player does not see the next-round waiting panel.')
+  assert(!fixtureResults.waiting.portrait.handVisible, 'A late-joining player still sees an interactive hand area.')
+  assert(fixtureResults.waiting.portrait.waitingReadyControlVisible, 'A late-joining player cannot confirm readiness for the next round.')
+  assert(fixtureResults.queued.portrait.waitingStripVisible, 'Active players cannot see who is waiting for the next round.')
+  assert(fixtureResults.queued.portrait.waitingRemoveControls > 0, 'The host cannot remove a queued player before the next deal.')
+  assert(!fixtureResults.queued.portrait.waitingStripOverlapsLead, 'The portrait waiting queue covers the follow-suit pill.')
+  assert(!fixtureResults.queued.portrait.waitingStripOverlapsMatchLog, 'The portrait waiting queue covers Match Log.')
+  assert(!fixtureResults.queued.portrait.waitingStripOverlapsTableTalk, 'The portrait waiting queue covers Table Talk.')
+  assert(!fixtureResults.queued.landscape.waitingStripOverlapsLead, 'The landscape waiting queue covers the follow-suit pill.')
+  assert(!fixtureResults.queued.landscape.waitingStripOverlapsMatchLog, 'The landscape waiting queue covers Match Log.')
+  assert(!fixtureResults.queued.landscape.waitingStripOverlapsTableTalk, 'The landscape waiting queue covers Table Talk.')
+  assert(fixtureResults.queued.portrait.matchLogText.includes('waiting to join the next round'), `The late-join Match Log copy is incorrect: ${fixtureResults.queued.portrait.matchLogText}`)
+  assert(!fixtureResults.queued.portrait.matchLogText.includes('reconnected'), 'A newly queued friend is mislabeled as reconnected.')
+  assert(fixtureResults.playing.portrait.tableTalkLabelVisible, 'The mobile Table Talk trigger hides its text label.')
+  assert(fixtureResults['finished-waiting'].portrait.waitingRemoveControls >= 5, 'The finished screen does not expose host controls for every waiting player.')
+  assert(!fixtureResults.finished.portrait.handVisible, 'The finished-round result leaves the old hand visible.')
+  assert(!fixtureResults.finished.landscape.handVisible, 'The landscape finished-round result leaves the old hand visible.')
 
   await cdp.send('Page.navigate', { url: CLIENT_URL })
   await waitForExpression(cdp, `Boolean(document.querySelector('.landing-shell'))`)
@@ -538,7 +620,7 @@ try {
   const report = {
     room: finalParticipant.credentials.code,
     playerId: finalParticipant.credentials.playerId,
-    landing: { ...landing, cta: landingCta },
+    landing: { ...landing, cta: landingCta, platformNotice },
     fixtures: fixtureResults,
     resolution: {
       observedAt: resolutionObservedAt,

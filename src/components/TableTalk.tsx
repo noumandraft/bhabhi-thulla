@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -128,6 +129,19 @@ const DEFAULT_LABELS: TableTalkLabels = {
 
 const TOUCH_TARGET: CSSProperties = { minWidth: 44, minHeight: 44 }
 const NEAR_BOTTOM_PX = 72
+const TABLE_TALK_MODAL_QUERY = '(max-width: 720px)'
+const FOCUSABLE = 'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+
+function canReceiveFocus(element: HTMLElement | null): element is HTMLElement {
+  if (!element?.isConnected || element.closest('[inert], [aria-hidden="true"], [hidden]')) return false
+  if ('disabled' in element && Boolean((element as HTMLButtonElement).disabled)) return false
+  return true
+}
+
+function visibleFocusableItems(container: HTMLElement | null): HTMLElement[] {
+  return Array.from(container?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])
+    .filter((element) => canReceiveFocus(element) && element.getClientRects().length > 0)
+}
 
 type IconProps = SVGProps<SVGSVGElement> & { size?: number }
 
@@ -222,6 +236,7 @@ export function TableTalk({
   const [internalError, setInternalError] = useState<string | null>(null)
   const [sendingReactionId, setSendingReactionId] = useState<string | null>(null)
   const [hasNewMessages, setHasNewMessages] = useState(false)
+  const [isModalSheet, setIsModalSheet] = useState(() => window.matchMedia?.(TABLE_TALK_MODAL_QUERY).matches ?? false)
   const draft = limitDraft(controlledDraft === undefined ? uncontrolledDraft : controlledDraft)
   const isSending = sending || internalSending
   const error = sendError || internalError
@@ -238,11 +253,14 @@ export function TableTalk({
   const errorId = `${baseId}-error`
 
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const drawerRef = useRef<HTMLElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
   const quickTabRef = useRef<HTMLButtonElement>(null)
   const chatTabRef = useRef<HTMLButtonElement>(null)
   const messageListRef = useRef<HTMLOListElement>(null)
   const wasOpenRef = useRef(false)
+  const previousFocusRef = useRef<HTMLElement | null>(null)
+  const restoreFocusOnCloseRef = useRef(true)
   const visitedChatRef = useRef(false)
   const nearBottomRef = useRef(true)
   const previousLastMessageIdRef = useRef<string | null>(null)
@@ -260,6 +278,37 @@ export function TableTalk({
   const lastVisibleMessageId = visibleMessages.at(-1)?.id ?? null
   const latestSequence = messages.reduce((latest, message) => Math.max(latest, message.sequence), 0)
   const markMessagesRead = useCallback(() => onMessagesRead?.(latestSequence), [latestSequence, onMessagesRead])
+
+  const restoreTableTalkFocus = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      const phaseTarget = document.querySelector<HTMLElement>('#round-result-title, #game-v2-hand, #game-v2-waiting-player')
+      const candidates = [triggerRef.current, previousFocusRef.current, phaseTarget]
+      candidates.find(canReceiveFocus)?.focus({ preventScroll: true })
+    })
+  }, [])
+
+  useEffect(() => {
+    const query = window.matchMedia(TABLE_TALK_MODAL_QUERY)
+    const updateLayoutMode = () => setIsModalSheet(query.matches)
+    updateLayoutMode()
+    query.addEventListener?.('change', updateLayoutMode)
+    return () => query.removeEventListener?.('change', updateLayoutMode)
+  }, [])
+
+  useLayoutEffect(() => {
+    if (!open || !isModalSheet) return
+    const previousOverflow = document.body.style.overflow
+    const containFocus = (event: FocusEvent) => {
+      if (drawerRef.current?.contains(event.target as Node)) return
+      ;(closeRef.current ?? drawerRef.current)?.focus({ preventScroll: true })
+    }
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('focusin', containFocus)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      document.removeEventListener('focusin', containFocus)
+    }
+  }, [isModalSheet, open])
 
   useEffect(() => {
     if ((!quickEnabled && !chatEnabled) || activeTabState === activeTab) return
@@ -285,12 +334,23 @@ export function TableTalk({
   }, [markMessagesRead])
 
   useEffect(() => {
-    if (open && !wasOpenRef.current) {
+    const wasOpen = wasOpenRef.current
+    if (open && !wasOpen) {
+      previousFocusRef.current = document.activeElement as HTMLElement | null
+      restoreFocusOnCloseRef.current = true
       window.requestAnimationFrame(() => closeRef.current?.focus())
     }
-    if (!open) visitedChatRef.current = false
+    if (!open && wasOpen) {
+      visitedChatRef.current = false
+      if (restoreFocusOnCloseRef.current) restoreTableTalkFocus()
+      restoreFocusOnCloseRef.current = true
+    }
     wasOpenRef.current = open
-  }, [open])
+  }, [open, restoreTableTalkFocus])
+
+  useEffect(() => () => {
+    if (wasOpenRef.current && restoreFocusOnCloseRef.current) restoreTableTalkFocus()
+  }, [restoreTableTalkFocus])
 
   useEffect(() => {
     if (!open || activeTab !== 'chat' || visitedChatRef.current) return
@@ -310,20 +370,38 @@ export function TableTalk({
     }
   }, [activeTab, lastVisibleMessageId, open, scrollToNewest])
 
-  function closeDrawer(restoreTriggerFocus = true) {
+  function closeDrawer() {
     onClose()
-    if (restoreTriggerFocus) window.requestAnimationFrame(() => triggerRef.current?.focus())
   }
 
   function returnToCards() {
+    restoreFocusOnCloseRef.current = false
     onClose()
     onReturnToCards()
   }
 
   function handleDrawerKeyDown(event: KeyboardEvent<HTMLElement>) {
-    if (event.key !== 'Escape') return
-    event.preventDefault()
-    closeDrawer()
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      closeDrawer()
+      return
+    }
+    if (!isModalSheet || event.key !== 'Tab') return
+    const items = visibleFocusableItems(drawerRef.current)
+    if (!items.length) {
+      event.preventDefault()
+      drawerRef.current?.focus()
+      return
+    }
+    const first = items[0]
+    const last = items[items.length - 1]
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === drawerRef.current)) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
   }
 
   function selectTab(tab: TableTalkTab, focus = false) {
@@ -420,12 +498,16 @@ export function TableTalk({
         ) : null}
       </button>
 
+      {open && isModalSheet ? <div className="table-talk__scrim" role="presentation" aria-hidden="true" onMouseDown={closeDrawer} /> : null}
+
       <aside
+        ref={drawerRef}
         id={drawerId}
         className="table-talk__drawer"
         role="dialog"
-        aria-modal="false"
+        aria-modal={isModalSheet ? 'true' : 'false'}
         aria-labelledby={titleId}
+        tabIndex={-1}
         hidden={!open}
         onKeyDown={handleDrawerKeyDown}
       >

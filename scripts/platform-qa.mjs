@@ -28,13 +28,67 @@ function pngDimensions(buffer) {
   return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) }
 }
 
+function attributeContent(source, attribute, value) {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`<meta\\s+[^>]*${attribute}=["']${escaped}["'][^>]*content=["']([^"']+)["'][^>]*>`, 'i')
+  return source.match(pattern)?.[1]
+}
+
+function jsonLdBlocks(source) {
+  return [...source.matchAll(/<script\s+type=["']application\/ld\+json["']\s*>([\s\S]*?)<\/script>/gi)]
+    .map((match) => JSON.parse(match[1]))
+}
+
 const html = await text('index.html')
 const packageJson = JSON.parse(await text('package.json'))
 const manifest = JSON.parse(await text('public/manifest.webmanifest'))
 const serviceWorker = await text('public/sw.js')
 const main = await text('src/main.tsx')
+const canonicalUrl = 'https://thulla.joypad.fun/'
+const expectedTitle = 'Play Bhabhi Thulla Online | Pakistani Getaway Card Game'
+const expectedDescription = 'Play Bhabhi Thulla online with friends using Pakistani rules. Create a private multiplayer room, learn the Getaway card game, and play free without signup.'
+const expectedGoogleVerification = '9cP7p25n5EnvgnfWRGZXAMF-2lT_SLyVtKvlvPr-hhs'
 const coreAssetBlock = serviceWorker.match(/const CORE_ASSETS = \[([\s\S]*?)\]\r?\n/)?.[1] ?? ''
 const coreAssetUrls = [...coreAssetBlock.matchAll(/'([^']+)'/g)].map((match) => match[1])
+
+function validateSeoPage(source, label) {
+  const documentTitle = source.match(/<title>([^<]+)<\/title>/i)?.[1]
+  const canonical = source.match(/<link\s+rel=["']canonical["']\s+href=["']([^"']+)["']/i)?.[1]
+  check(documentTitle === expectedTitle, `${label}: document title must use the approved SEO positioning.`)
+  check(attributeContent(source, 'name', 'description') === expectedDescription, `${label}: meta description must use the approved SEO copy.`)
+  check(attributeContent(source, 'name', 'google-site-verification') === expectedGoogleVerification, `${label}: Google Search Console verification tag is missing or incorrect.`)
+  check(canonical === canonicalUrl, `${label}: canonical URL must stay at the production application root.`)
+  check(attributeContent(source, 'property', 'og:title') === expectedTitle, `${label}: Open Graph title must match the document title.`)
+  check(attributeContent(source, 'property', 'og:description') === expectedDescription, `${label}: Open Graph description must match the meta description.`)
+  check(attributeContent(source, 'property', 'og:url') === canonicalUrl, `${label}: Open Graph URL must match the canonical URL.`)
+  check(attributeContent(source, 'name', 'twitter:title') === expectedTitle, `${label}: Twitter title must match the document title.`)
+  check(attributeContent(source, 'name', 'twitter:description') === expectedDescription, `${label}: Twitter description must match the meta description.`)
+
+  let structuredData = []
+  try {
+    structuredData = jsonLdBlocks(source)
+  } catch (error) {
+    errors.push(`${label}: structured data is not valid JSON: ${error.message}`)
+  }
+  const gameSchema = structuredData.find((entry) => {
+    const types = Array.isArray(entry['@type']) ? entry['@type'] : [entry['@type']]
+    return types.includes('VideoGame') && types.includes('WebApplication')
+  })
+  check(Boolean(gameSchema), `${label}: structured data must describe the product as both a VideoGame and WebApplication.`)
+  if (!gameSchema) return
+
+  check(gameSchema['@context'] === 'https://schema.org', `${label}: game structured data must use the Schema.org context.`)
+  check(gameSchema['@id'] === `${canonicalUrl}#game`, `${label}: game structured-data ID must be anchored to the canonical URL.`)
+  check(gameSchema.url === canonicalUrl, `${label}: game structured-data URL must match the canonical URL.`)
+  check(gameSchema.name === 'Bhabhi Thulla', `${label}: game structured data must include the product name.`)
+  check(gameSchema.description === expectedDescription, `${label}: game structured-data description must match the page description.`)
+  check(gameSchema.applicationCategory === 'GameApplication', `${label}: game structured data must use the GameApplication category.`)
+  check(gameSchema.operatingSystem === 'Any', `${label}: the web game must declare operating-system independence.`)
+  check(gameSchema.isAccessibleForFree === true, `${label}: the game must be marked as free to access.`)
+  check(gameSchema.offers?.['@type'] === 'Offer' && gameSchema.offers?.price === 0, `${label}: the free game must include a numeric zero-price Offer.`)
+  check(Array.isArray(gameSchema.playMode) && gameSchema.playMode.includes('https://schema.org/MultiPlayer'), `${label}: game structured data must identify multiplayer play.`)
+  check(!('aggregateRating' in gameSchema) && !('review' in gameSchema), `${label}: structured data must not contain unverified ratings or reviews.`)
+}
 
 for (const expected of [
   'rel="canonical"',
@@ -46,6 +100,8 @@ for (const expected of [
   'name="theme-color"',
   'viewport-fit=cover',
 ]) check(html.includes(expected), `index.html is missing ${expected}`)
+
+validateSeoPage(html, 'index.html')
 
 check(manifest.id === '/', 'Manifest id must stay at the application root.')
 check(manifest.scope === '/', 'Manifest scope must stay at the application root.')
@@ -123,6 +179,14 @@ check(liveGuard >= 0 && liveGuard < navigationHandler, 'Live and cross-origin re
 if (await exists('dist/index.html')) {
   const builtHtml = await text('dist/index.html')
   const builtServiceWorker = await text('dist/sw.js')
+  validateSeoPage(builtHtml, 'dist/index.html')
+  check((builtHtml.match(/<main(?:\s|>)/gi) ?? []).length === 1, 'Built HTML must prerender exactly one main landmark.')
+  check((builtHtml.match(/<h1(?:\s|>)/gi) ?? []).length === 1, 'Built HTML must prerender exactly one H1.')
+  check((builtHtml.match(/<article(?:\s|>)/gi) ?? []).length === 1, 'Built HTML must prerender exactly one guide article.')
+  check(!builtHtml.includes('<div id="root"></div>'), 'Built HTML must not leave the React root empty.')
+  check(builtHtml.includes('Bhabhi Thulla card game rules'), 'Built HTML must include the crawlable Pakistani rules heading.')
+  check(builtHtml.includes('What is Bhabhi Thulla called in English?'), 'Built HTML must include the crawlable English-name answer.')
+  check(builtHtml.includes('type="module"'), 'SEO prerendering must preserve the client module script.')
   const builtAssetUrls = [...builtHtml.matchAll(/(?:src|href)=["'](\/assets\/[^"']+)["']/g)]
     .map((match) => match[1])
   check(builtAssetUrls.length >= 2, 'Built HTML must reference at least its JavaScript and stylesheet bundles.')
@@ -149,5 +213,5 @@ if (errors.length) {
   for (const error of errors) console.error(`- ${error}`)
   process.exitCode = 1
 } else {
-  console.log('Platform QA passed: metadata, PWA assets, update safety, cache exclusions, and image dimensions are valid.')
+  console.log('Platform QA passed: SEO metadata, game structured data, PWA assets, update safety, cache exclusions, and image dimensions are valid.')
 }

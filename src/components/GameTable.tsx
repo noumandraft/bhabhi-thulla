@@ -22,6 +22,7 @@ const Help = (props: IconProps) => <Icon {...props}><circle cx="12" cy="12" r="9
 const History = (props: IconProps) => <Icon {...props}><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></Icon>
 const LogOut = (props: IconProps) => <Icon {...props}><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/><path d="M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/></Icon>
 const Message = (props: IconProps) => <Icon {...props}><path d="M21 15a4 4 0 0 1-4 4H8l-5 3 1.7-5A7 7 0 0 1 3 12V8a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></Icon>
+const MoreHorizontal = (props: IconProps) => <Icon {...props}><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></Icon>
 const Play = (props: IconProps) => <Icon {...props}><path d="m7 4 13 8L7 20z"/></Icon>
 const RotateCcw = (props: IconProps) => <Icon {...props}><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></Icon>
 const Settings = (props: IconProps) => <Icon {...props}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1z"/></Icon>
@@ -31,8 +32,8 @@ const Wifi = (props: IconProps) => <Icon {...props}><path d="M5 12.6a10 10 0 0 1
 const WifiOff = (props: IconProps) => <Icon {...props}><path d="m2 2 20 20M8.5 16a5 5 0 0 1 5.7-.9M5 12.6a10 10 0 0 1 4-2M2 9.3A15 15 0 0 1 6 7M14 7a15 15 0 0 1 8 2.3"/><circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/></Icon>
 const X = (props: IconProps) => <Icon {...props}><path d="M18 6 6 18M6 6l12 12"/></Icon>
 
-function IconButton({ label, onClick, children, className = '' }: { label: string; onClick: () => void; children: ReactNode; className?: string }) {
-  return <button className={`game-v2-icon-button ${className}`.trim()} type="button" aria-label={label} title={label} onClick={onClick}>{children}</button>
+function IconButton({ label, onClick, children, className = '', disabled = false }: { label: string; onClick: () => void; children: ReactNode; className?: string; disabled?: boolean }) {
+  return <button className={`game-v2-icon-button ${className}`.trim()} type="button" aria-label={label} title={label} disabled={disabled} onClick={onClick}>{children}</button>
 }
 
 function GameLogo() {
@@ -65,9 +66,11 @@ function useCountdown(endsAt: number | null, active: boolean, expectedDuration: 
     if (!active || endsAt === null) return null
     const serverDelta = endsAt - Date.now()
     const tolerance = Math.max(1_000, expectedDuration * .15)
-    const observedDuration = serverDelta > 0 && serverDelta <= expectedDuration + tolerance
-      ? Math.min(serverDelta, expectedDuration)
-      : expectedDuration
+    const observedDuration = serverDelta <= 0
+      ? 0
+      : serverDelta <= expectedDuration + tolerance
+        ? Math.min(serverDelta, expectedDuration)
+        : expectedDuration
     return performance.now() + observedDuration
   }, [active, endsAt, expectedDuration])
   const [, refresh] = useState(0)
@@ -94,7 +97,8 @@ function TurnClock({ endsAt, duration, t, alertForYou = false, sound = false, ha
       if (haptics && navigator.vibrate) navigator.vibrate(55)
     }
   }, [seconds, alertForYou, sound, haptics, t])
-  return <><span className={`game-v2-clock ${seconds <= 8 ? 'is-low' : ''}`} aria-hidden="true"><Clock3 size={16}/> {seconds}s</span><span className="sr-only" aria-live="polite">{announcement}</span></>
+  const timerLabel = seconds === 0 ? t('timeExpired') : t('secondsRemaining', { count: seconds })
+  return <><span className={`game-v2-clock ${seconds <= 8 ? 'is-low' : ''}`} role="timer" aria-live="off" aria-label={timerLabel}><Clock3 size={16}/> <span aria-hidden="true">{seconds}s</span></span><span className="sr-only" aria-live="polite" aria-atomic="true">{announcement}</span></>
 }
 
 function orderedOpponents(players: Player[], playerId: string): Player[] {
@@ -118,7 +122,7 @@ function OpponentSeat({ player, isTurn, isRight, placement, t }: { player: Playe
   const initials = player.name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()
   const status = player.escaped ? t('safe') : player.reconnecting || !player.connected ? t('reconnecting') : t(player.cardCount === 1 ? 'card' : 'cards', { count: player.cardCount })
   return <article className={`game-v2-seat ${placement.className} ${isTurn ? 'is-turn' : ''} ${isRight ? 'is-right-player' : ''} ${player.escaped ? 'is-escaped' : ''} ${!player.connected ? 'is-offline' : ''}`} style={placement.style} aria-label={`${player.name}, ${status}${isRight ? `, ${t('nextRightSuffix')}` : ''}${isTurn ? `, ${t('currentTurnSuffix')}` : ''}`}>
-    <div className="game-v2-seat__avatar" aria-hidden="true">{player.escaped ? <Check size={20} strokeWidth={3}/> : player.isBot ? 'AI' : initials}</div><div className="game-v2-seat__cards" aria-hidden="true"><i/><i/><i/></div><div className="game-v2-seat__copy"><b>{player.name}</b><span>{status}</span></div>{player.isHost ? <Crown className="game-v2-seat__host" size={15} aria-label={t('host')}/> : null}{isTurn ? <span className="game-v2-seat__turn">{t('turnLabel')}</span> : null}{isRight && !player.escaped ? <span className="game-v2-seat__right">{t('rightNext')}</span> : null}
+    <div className="game-v2-seat__avatar" aria-hidden="true">{player.escaped ? <Check size={20} strokeWidth={3}/> : player.isBot ? 'AI' : initials}</div><div className="game-v2-seat__cards" aria-hidden="true"><i/><i/><i/></div><div className="game-v2-seat__copy"><b><bdi dir="auto">{player.name}</bdi></b><span>{status}</span></div>{player.isHost ? <Crown className="game-v2-seat__host" size={15} aria-label={t('host')}/> : null}{isTurn ? <span className="game-v2-seat__turn">{t('turnLabel')}</span> : null}{isRight && !player.escaped ? <span className="game-v2-seat__right">{t('rightNext')}</span> : null}
   </article>
 }
 
@@ -185,7 +189,10 @@ function RoundResult({ room, me, loser, busy, t, onReady, onRestart, onReset, on
   useEffect(() => {
     const previousFocus = document.activeElement as HTMLElement | null
     headingRef.current?.focus()
-    return () => previousFocus?.focus()
+    return () => {
+      if (!previousFocus?.isConnected || previousFocus.closest('[inert], [aria-hidden="true"]')) return
+      previousFocus.focus({ preventScroll: true })
+    }
   }, [])
   function trapFocus(event: KeyboardEvent<HTMLDivElement>) {
     if (event.key !== 'Tab') return
@@ -198,12 +205,18 @@ function RoundResult({ room, me, loser, busy, t, onReady, onRestart, onReset, on
   const resultTitle = loser?.isYou ? t('youAreBhabhi') : t('playerIsBhabhi', { name: loser?.name ?? t('player') })
   return <div className="game-v2-result"><div ref={dialogRef} className="game-v2-result__card" role="dialog" aria-modal="true" aria-labelledby="round-result-title" onKeyDown={trapFocus}>
     <span className="sr-only" role="status" aria-live="assertive">{t('roundResultAnnouncement', { result: resultTitle })}</span>
-    <div className="game-v2-result__summary"><span className="game-v2-result__mark" aria-hidden="true">B</span><span className="game-v2-eyebrow">{t('roundOver')} · {t('round', { count: room.session.roundNumber })}</span><h2 ref={headingRef} id="round-result-title" tabIndex={-1}>{resultTitle}</h2><div className="game-v2-scoreboard" aria-label={t('sessionScore')}><div><b>{t('sessionScore')}</b><Trophy size={18}/></div>{scores.map((score) => <p key={score.playerId}><span>{score.playerName}</span><b>{score.escapes} {t('gotAway')}</b><em>{score.bhabhiCount} {t('bhabhi')}</em></p>)}</div></div>
+    <div className="game-v2-result__summary"><span className="game-v2-result__mark" aria-hidden="true">B</span><span className="game-v2-eyebrow">{t('roundOver')} · {t('round', { count: room.session.roundNumber })}</span><h2 ref={headingRef} id="round-result-title" tabIndex={-1}>{resultTitle}</h2><div className="game-v2-scoreboard" aria-label={t('sessionScore')}><div><b>{t('sessionScore')}</b><Trophy size={18}/></div>{scores.map((score) => <p key={score.playerId}><span><bdi dir="auto">{score.playerName}</bdi></span><b>{score.escapes} {t('gotAway')}</b><em>{score.bhabhiCount} {t('bhabhi')}</em></p>)}</div></div>
     <div className="game-v2-result__controls">
-      {waitingPlayers.length ? <div className="game-v2-result__waiting"><b>{t('waitingPlayers')}</b>{waitingPlayers.map((player) => <div className="game-v2-result__waiting-person" key={player.id}><span>{player.rematchReady || player.isBot ? <Check size={15}/> : <Clock3 size={15}/>}<bdi dir="auto">{player.name}</bdi><small>{player.rematchReady || player.isBot ? t('readyForNextRound') : t('waitingConfirmation')}</small></span>{me.isHost && player.id !== me.id ? <button className="game-v2-remove-waiting" type="button" disabled={busy} onClick={() => onRemoveWaiting(player)} aria-label={t('removeWaitingPlayer', { name: player.name })} title={t('removeWaitingPlayer', { name: player.name })}><X size={17}/></button> : null}</div>)}</div> : null}
-      <div className="game-v2-rematch-status">{activePlayers.map((player) => <span key={player.id} className={player.isBot || player.rematchReady ? 'is-ready' : ''}>{player.isBot || player.rematchReady ? <Check size={14}/> : <Clock3 size={14}/>} {player.name}</span>)}</div>
+      {waitingPlayers.length ? <div className="game-v2-result__waiting"><b>{t('waitingPlayers')}</b>{waitingPlayers.map((player) => {
+        const ready = player.rematchReady || player.isBot
+        return <div className="game-v2-result__waiting-person" key={player.id}><span aria-label={ready ? t('playerReadyStatus', { name: player.name }) : t('playerWaitingStatus', { name: player.name })}>{ready ? <Check size={15}/> : <Clock3 size={15}/>}<bdi dir="auto">{player.name}</bdi><small>{ready ? t('readyForNextRound') : t('waitingForReadiness')}</small></span>{me.isHost && player.id !== me.id ? <button className="game-v2-remove-waiting" type="button" disabled={busy} onClick={() => onRemoveWaiting(player)} aria-label={t('removeWaitingPlayer', { name: player.name })} title={t('removeWaitingPlayer', { name: player.name })}><X size={17}/></button> : null}</div>
+      })}</div> : null}
+      <div className="game-v2-rematch-status">{activePlayers.map((player) => {
+        const ready = player.isBot || player.rematchReady
+        return <span key={player.id} className={ready ? 'is-ready' : ''} aria-label={ready ? t('playerReadyStatus', { name: player.name }) : t('playerWaitingStatus', { name: player.name })}>{ready ? <Check size={14}/> : <Clock3 size={14}/>} <bdi dir="auto">{player.name}</bdi><small>{ready ? t('readyForNextRound') : t('waitingForReadiness')}</small></span>
+      })}</div>
       {me.waitingForNextRound ? <div className="game-v2-result__queued"><b>{t('joinNextRoundTitle')}</b><span>{t('joinNextRoundBody', { count: me.joinedInRound, round: me.joinedInRound })}</span></div> : null}
-      <button className={`game-v2-button ${me.rematchReady ? 'game-v2-button--secondary' : 'game-v2-button--primary'} game-v2-button--wide`} type="button" disabled={busy} onClick={onReady}>{me.rematchReady ? t('notReady') : t('rematchReady')}</button>
+      <button className={`game-v2-button ${me.rematchReady ? 'game-v2-button--secondary' : 'game-v2-button--primary'} game-v2-button--wide`} type="button" disabled={busy} onClick={onReady}>{me.rematchReady ? t('cancelReadiness') : t('markReadyForNextRound')}</button>
       {me.isHost && allReady ? <button className="game-v2-button game-v2-button--primary game-v2-button--wide" type="button" disabled={busy} onClick={onRestart}><RotateCcw size={19}/> {t('playAnother')}</button> : !me.waitingForNextRound ? <p className="game-v2-result__wait">{t('waitingRematch')}</p> : null}
       {me.isHost ? <button className="game-v2-reset" type="button" disabled={busy} onClick={onReset}>{t('resetSession')}</button> : null}
     </div>
@@ -244,17 +257,25 @@ export default function GameTable({ room, socket, connected, t, language, chatSu
   const [resultBusy, setResultBusy] = useState(false)
   const opponentsRef = useRef<HTMLDivElement>(null)
   const handRef = useRef<HTMLDivElement>(null)
+  const gameStatusRef = useRef<HTMLDivElement>(null)
+  const headerOverflowRef = useRef<HTMLDetailsElement>(null)
   const explanationButtonRef = useRef<HTMLButtonElement>(null)
   const explanationPanelRef = useRef<HTMLParagraphElement>(null)
   const explanationPreviousFocus = useRef<HTMLElement | null>(null)
   const [scrollHint, setScrollHint] = useState(false)
   const [handOverflow, setHandOverflow] = useState(false)
+  const [opponentScrollHint, setOpponentScrollHint] = useState(false)
+  const [opponentOverflow, setOpponentOverflow] = useState(false)
+  const [opponentHintDismissed, setOpponentHintDismissed] = useState(false)
+  const [queueAnnouncement, setQueueAnnouncement] = useState('')
+  const [reconnectAnnouncement, setReconnectAnnouncement] = useState('')
   const legalIds = useMemo(() => new Set(game.legalCardIds), [game.legalCardIds])
   const isFinished = room.status === 'finished'
   const isResolving = game.phase === 'resolving'
   const isThullaResolution = isResolving && game.resolvedTrick?.kind === 'thulla'
   const isReconnectPause = game.phase === 'waiting_for_reconnect'
   const isMyTurn = game.phase === 'turn' && game.currentTurnId === me.id && !me.waitingForNextRound
+  const preferencesBlocked = isMyTurn || isResolving || isFinished
   const canAct = connected && room.status === 'playing' && isMyTurn && !isResolving && !isReconnectPause
   const selectedCard = game.hand.find((card) => card.id === selectedCardId)
   const visibleTrick = isResolving && game.resolvedTrick ? game.resolvedTrick.cards : game.trick
@@ -266,11 +287,39 @@ export default function GameTable({ room, socket, connected, t, language, chatSu
   const previousResolution = useRef<string | null>(null)
   const previousEscaped = useRef(me.escaped)
   const previousFinished = useRef(room.status === 'finished')
+  const previousRoundNumber = useRef(room.session.roundNumber)
+  const previousReconnect = useRef<{ active: boolean; playerId: string | null }>({ active: false, playerId: null })
 
   useEffect(() => { if (selectedCardId && (!game.hand.some((card) => card.id === selectedCardId) || !legalIds.has(selectedCardId) || !canAct)) setSelectedCardId(null) }, [game.hand, legalIds, selectedCardId, canAct])
   useEffect(() => { if (!game.canTakeRightHand || !canAct) setTakeConfirmOpen(false) }, [game.canTakeRightHand, canAct])
-  useEffect(() => { if (isMyTurn) setPreferenceOpen(false) }, [isMyTurn])
+  useEffect(() => {
+    setQueueAnnouncement(me.waitingForNextRound
+      ? me.rematchReady
+        ? t('queueReadyAnnouncement', { round: me.joinedInRound })
+        : t('queueWaitingAnnouncement', { round: me.joinedInRound })
+      : '')
+  }, [me.joinedInRound, me.rematchReady, me.waitingForNextRound, t])
+  useEffect(() => {
+    const roundChanged = previousRoundNumber.current !== room.session.roundNumber
+    previousRoundNumber.current = room.session.roundNumber
+    const shouldClose = isMyTurn || isResolving || isFinished || roundChanged
+    if (!shouldClose) return
+    if (headerOverflowRef.current) headerOverflowRef.current.open = false
+    if (!preferenceOpen) return
+    setPreferenceOpen(false)
+    if (!isFinished) window.requestAnimationFrame(() => gameStatusRef.current?.focus({ preventScroll: true }))
+  }, [isFinished, isMyTurn, isResolving, preferenceOpen, room.session.roundNumber])
   useEffect(() => { if (!isResolving && game.trick.length > 0) setExplanationOpen(false) }, [isResolving, game.trick.length])
+  useEffect(() => {
+    const playerId = isReconnectPause ? reconnectPlayer?.id ?? null : null
+    const previous = previousReconnect.current
+    if (isReconnectPause && (!previous.active || previous.playerId !== playerId)) {
+      setReconnectAnnouncement(t('reconnectLiveWaiting', { name: reconnectPlayer?.name ?? t('player') }))
+    } else if (!isReconnectPause && previous.active) {
+      setReconnectAnnouncement(isFinished ? '' : t('reconnectLiveResumed'))
+    }
+    previousReconnect.current = { active: isReconnectPause, playerId }
+  }, [isFinished, isReconnectPause, reconnectPlayer?.id, reconnectPlayer?.name, t])
   useEffect(() => {
     const becameMyTurn = isMyTurn && !previousMyTurn.current
     previousMyTurn.current = isMyTurn
@@ -315,14 +364,32 @@ export default function GameTable({ room, socket, connected, t, language, chatSu
   }, [explanationOpen])
   useEffect(() => {
     const update = () => {
-      const overflows = Boolean(handRef.current && handRef.current.scrollWidth > handRef.current.clientWidth + 8)
-      setHandOverflow(overflows)
-      setScrollHint(room.settings.tutorialHints && !preferences.scrollHintSeen && overflows)
+      const handOverflows = Boolean(handRef.current && handRef.current.scrollWidth > handRef.current.clientWidth + 8)
+      const opponentsOverflow = Boolean(opponentsRef.current && opponentsRef.current.scrollWidth > opponentsRef.current.clientWidth + 8)
+      setHandOverflow(handOverflows)
+      setOpponentOverflow(opponentsOverflow)
+      setScrollHint(room.settings.tutorialHints && !preferences.scrollHintSeen && handOverflows)
+      setOpponentScrollHint(room.settings.tutorialHints && !opponentHintDismissed && opponentsOverflow)
     }
-    update(); window.addEventListener('resize', update); return () => window.removeEventListener('resize', update)
-  }, [game.hand.length, preferences.scrollHintSeen, room.settings.tutorialHints])
+    const frame = window.requestAnimationFrame(update)
+    const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update)
+    if (handRef.current) resizeObserver?.observe(handRef.current)
+    if (opponentsRef.current) resizeObserver?.observe(opponentsRef.current)
+    window.addEventListener('resize', update)
+    return () => { window.cancelAnimationFrame(frame); resizeObserver?.disconnect(); window.removeEventListener('resize', update) }
+  }, [game.hand.length, opponentHintDismissed, opponents.length, preferences.scrollHintSeen, room.settings.tutorialHints])
 
-  function markScrolled() { if (!preferences.scrollHintSeen) onPreference('scrollHintSeen', true); setScrollHint(false) }
+  function markHandScrolled() { if (!preferences.scrollHintSeen) onPreference('scrollHintSeen', true); setScrollHint(false) }
+  function markOpponentsScrolled() { setOpponentHintDismissed(true); setOpponentScrollHint(false) }
+  function openPreferences() {
+    if (preferencesBlocked) return
+    if (headerOverflowRef.current) headerOverflowRef.current.open = false
+    setPreferenceOpen(true)
+  }
+  function runOverflowAction(action: () => void) {
+    if (headerOverflowRef.current) headerOverflowRef.current.open = false
+    action()
+  }
   async function playSelected() { if (!selectedCardId || !canAct) return; setPlaying(true); const response = await emitWithAck(socket, 'game:play', { cardId: selectedCardId }); setPlaying(false); if (!response.ok) onToast(response.error ?? t('cardPlayFailed'), 'error'); else setSelectedCardId(null) }
   async function takeRightHand() { if (!game.canTakeRightHand || !takeTarget || !canAct) return; setTaking(true); const response = await emitWithAck(socket, 'game:take-right', {}); setTaking(false); setTakeConfirmOpen(false); if (!response.ok) onToast(response.error ?? t('takeFailed'), 'error'); else onToast(t('takeSuccess', { name: takeTarget.name }), 'success') }
   async function copyRoomCode() { try { await navigator.clipboard.writeText(room.code); onToast(t('roomCodeCopied'), 'success') } catch { onToast(`${t('roomCode')}: ${room.code}`, 'info') } }
@@ -340,6 +407,7 @@ export default function GameTable({ room, socket, connected, t, language, chatSu
   else if (game.firstTrick) tableMessage = game.trick.length === 0 ? t('aceSpadesOpens') : t('openingEveryone')
   else if (isMyTurn) tableMessage = game.canTakeRightHand ? t('leadOrTake') : t('chooseLegalCard')
   else tableMessage = t('playerThinking', { name: currentPlayer?.name ?? t('player') })
+  const statusLabel = isThullaResolution ? `THULLA! · ${t('nextTrick')}` : isResolving ? t('nextTrick') : isMyTurn ? t('yourTurn') : game.firstTrick ? t('openingTrick') : t('currentTurn')
   const ledSuit = game.resolvedTrick?.cards[0]?.card.suit ?? game.leadSuit
   const explanation = game.resolvedTrick?.kind === 'thulla'
     ? t('explainThulla', { last: resolvedLastPlayer?.name ?? t('player'), suit: ledSuit ? localizedSuit(t, ledSuit) : t('ledSuit'), winner: resolvedWinner?.name ?? t('player') })
@@ -353,34 +421,59 @@ export default function GameTable({ room, socket, connected, t, language, chatSu
   const trickSummary = visibleTrick.length
     ? visibleTrick.map((entry) => t('playedCard', { name: entry.playerId === me.id ? t('you') : entry.playerName, card: t('cardName', { rank: entry.card.rank, suit: localizedSuit(t, entry.card.suit) }) })).join(' ')
     : game.firstTrick ? t('waitingAce') : t('tableClear')
+  const settingsButtonLabel = preferencesBlocked ? t('settingsUnavailable') : t('settings')
 
-  return <main className={`game-v2-shell ${isFinished ? 'is-finished' : ''} ${me.waitingForNextRound ? 'is-waiting' : ''}`}>
+  return <main className={`game-v2-shell ${isFinished ? 'is-finished' : ''} ${me.waitingForNextRound ? 'is-waiting' : ''} ${isResolving ? 'is-resolving' : ''} ${isReconnectPause ? 'is-reconnecting' : ''} ${canReviewExplanation ? 'has-explanation' : ''}`}>
     {!isFinished ? <a className="game-v2-skip" href={me.waitingForNextRound ? '#game-v2-waiting-player' : '#game-v2-hand'}>{me.waitingForNextRound ? t('watchingTable') : t('skipToHand')}</a> : null}
-    <header className="game-v2-header" aria-hidden={isFinished || undefined} inert={isFinished || undefined}><GameLogo/><button className="game-v2-room" type="button" onClick={() => void copyRoomCode()} aria-label={t('copyRoomCode', { code: room.code })}><span>{t('room')}</span><b>{room.code}</b><Copy size={16}/></button><div className="game-v2-header__actions"><span className={`game-v2-connection ${connected ? 'is-online' : ''}`} role="status" aria-label={connected ? t('connectedServer') : t('reconnectingServer')}>{connected ? <Wifi size={17}/> : <WifiOff size={17}/>}<span>{connected ? t('live') : t('reconnecting')}</span></span><IconButton label={t('settings')} onClick={() => setPreferenceOpen(true)}><Settings size={21}/></IconButton><IconButton label={t('howToPlay')} onClick={onOpenRules}><BookOpen size={21}/></IconButton><IconButton className="game-v2-icon-button--danger" label={t('leaveTable')} onClick={onLeave}><LogOut size={21}/></IconButton></div></header>
+    <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{queueAnnouncement}</span>
+    <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{reconnectAnnouncement}</span>
+    <header className="game-v2-header" aria-hidden={isFinished || undefined} inert={isFinished || undefined}>
+      <GameLogo/>
+      <button className="game-v2-room" type="button" onClick={() => void copyRoomCode()} aria-label={t('copyRoomCode', { code: room.code })}><span>{t('room')}</span><b>{room.code}</b><Copy size={16}/></button>
+      <div className="game-v2-header__actions">
+        <span className={`game-v2-connection ${connected ? 'is-online' : ''}`} role="status" aria-label={connected ? t('connectedServer') : t('reconnectingServer')}>{connected ? <Wifi size={17}/> : <WifiOff size={17}/>}<span>{connected ? t('live') : t('reconnecting')}</span></span>
+        <div className="game-v2-header-secondary">
+          <IconButton label={settingsButtonLabel} disabled={preferencesBlocked} onClick={openPreferences}><Settings size={21}/></IconButton>
+          <IconButton label={t('howToPlay')} onClick={onOpenRules}><BookOpen size={21}/></IconButton>
+          <IconButton className="game-v2-icon-button--danger" label={t('leaveTable')} onClick={onLeave}><LogOut size={21}/></IconButton>
+        </div>
+        <details ref={headerOverflowRef} className="game-v2-header-overflow" onKeyDown={(event) => { if (event.key === 'Escape' && headerOverflowRef.current?.open) { event.preventDefault(); headerOverflowRef.current.open = false; headerOverflowRef.current.querySelector<HTMLElement>('summary')?.focus() } }}>
+          <summary aria-label={t('moreOptions')} title={t('moreOptions')}><MoreHorizontal size={22}/></summary>
+          <div className="game-v2-header-overflow__panel" role="group" aria-label={t('gameOptions')}>
+            <button type="button" disabled={preferencesBlocked} aria-label={settingsButtonLabel} title={settingsButtonLabel} onClick={openPreferences}><Settings size={19}/><span>{t('settings')}</span></button>
+            <button type="button" onClick={() => runOverflowAction(onOpenRules)}><BookOpen size={19}/><span>{t('howToPlay')}</span></button>
+            <button className="is-danger" type="button" onClick={() => runOverflowAction(onLeave)}><LogOut size={19}/><span>{t('leaveTable')}</span></button>
+          </div>
+        </details>
+      </div>
+    </header>
     <div className="game-v2-layout" aria-hidden={isFinished || undefined} inert={isFinished || undefined}>
       <section className={`game-v2-table ${isResolving ? 'has-resolved' : ''} ${isReconnectPause ? 'is-paused' : ''}`} aria-label={t('cardTable')}>
-        <div ref={opponentsRef} className="game-v2-opponents" data-count={opponents.length} aria-label={t('otherPlayers')} onScroll={markScrolled}>{opponents.map((player, index) => <OpponentSeat key={player.id} player={player} isTurn={player.id === game.currentTurnId} isRight={player.id === rightPlayer?.id} placement={seatPlacement(index, opponents.length)} t={t}/>)}</div>
+        <div ref={opponentsRef} className={`game-v2-opponents ${opponentOverflow ? 'has-overflow' : ''}`} data-count={opponents.length} aria-label={t('otherPlayers')} onScroll={markOpponentsScrolled}>{opponents.map((player, index) => <OpponentSeat key={player.id} player={player} isTurn={player.id === game.currentTurnId} isRight={player.id === rightPlayer?.id} placement={seatPlacement(index, opponents.length)} t={t}/>)}</div>
+        {opponentScrollHint ? <span className="game-v2-opponent-scroll-hint" role="status"><span aria-hidden="true">&harr;</span> {t('swipePlayersHint')}</span> : null}
         {room.settings.tutorialHints ? <div className="game-v2-direction" aria-label={t('directionDescription')}><span>{t('playDirection')}</span><i aria-hidden="true">→</i><b>{t('right')}</b></div> : null}
-        {waitingPlayers.length && !me.waitingForNextRound ? <details className="game-v2-waiting-strip"><summary aria-label={t('waitingPlayerCount', { count: waitingPlayers.length })}><Clock3 size={16}/><span>{t('waitingPlayers')}</span><b>{waitingPlayers.length}</b></summary><div>{waitingPlayers.map((player) => <div className="game-v2-waiting-person" key={player.id}><span><bdi dir="auto">{player.name}</bdi><small>{player.rematchReady || player.isBot ? t('readyForNextRound') : t('waitingConfirmation')}</small></span>{me.isHost ? <button className="game-v2-remove-waiting" type="button" disabled={resultBusy || !connected} onClick={() => removeWaiting(player)} aria-label={t('removeWaitingPlayer', { name: player.name })} title={t('removeWaitingPlayer', { name: player.name })}><X size={17}/></button> : null}</div>)}</div></details> : null}
-        {liveReaction && !isResolving && !preferences.reactionsMuted ? <div className="game-v2-live-reaction" role="status"><b>{liveReaction.playerId === me.id ? t('you') : liveReaction.playerName}</b><span>{reactionLabel(liveReaction.reaction, t)}</span></div> : null}
-        <div className="game-v2-center">
-          {isReconnectPause ? <div className="game-v2-reconnect-banner" role="group" aria-label={t('disconnectedPaused', { name: reconnectPlayer?.name ?? t('player') })}><WifiOff size={21}/><div><b>{t('waitingReconnect', { name: reconnectPlayer?.name ?? t('player'), count: reconnectCountdown.seconds })}</b><span>{t('reconnectPaused')}</span></div>{me.isHost && reconnectPlayer ? <button type="button" disabled={resultBusy || !connected} onClick={replaceWithBot}>{t('replaceBot')}</button> : null}</div> : null}
-          <div className="game-v2-piles"><div className="game-v2-waste" aria-label={t('cardsInWaste', { count: game.wasteCount })}><div className="game-v2-card-back"/><b>{game.wasteCount}<span>{t('waste')}</span></b></div><div className={`game-v2-trick ${isResolving ? 'is-resolved' : ''} ${isResolving && resolutionCountdown.milliseconds <= 240 ? 'is-clearing' : ''}`} aria-label={isResolving ? t('completedTrickLabel') : t('currentTrickLabel')}>{visibleTrick.length === 0 ? <div className="game-v2-empty-trick"><span aria-hidden="true">♠</span><p>{game.firstTrick ? t('aceOpens') : t('leadAnySuit')}</p></div> : visibleTrick.map((entry, index) => <div className={`game-v2-trick-card ${game.resolvedTrick?.lastPlayerId === entry.playerId ? 'is-last-played' : ''}`} key={`${entry.playerId}-${entry.card.id}`} style={{ '--trick-index': index } as CSSProperties}><PlayingCard card={entry.card} t={t} small/><span>{entry.playerId === me.id ? t('you') : entry.playerName}</span></div>)}{isResolving && game.resolvedTrick ? <div className={`game-v2-resolution game-v2-resolution--${game.resolvedTrick.kind}`} aria-hidden="true"><Clock3 size={14}/><b>{resolutionCountdown.seconds}s</b></div> : null}</div></div>
+        {waitingPlayers.length && !me.waitingForNextRound ? <details className="game-v2-waiting-strip"><summary aria-label={t('waitingPlayerCount', { count: waitingPlayers.length })}><Clock3 size={16}/><span>{t('waitingPlayers')}</span><b>{waitingPlayers.length}</b></summary><div>{waitingPlayers.map((player) => {
+          const ready = player.rematchReady || player.isBot
+          return <div className="game-v2-waiting-person" key={player.id}><span aria-label={ready ? t('playerReadyStatus', { name: player.name }) : t('playerWaitingStatus', { name: player.name })}><bdi dir="auto">{player.name}</bdi><small>{ready ? t('readyForNextRound') : t('waitingForReadiness')}</small></span>{me.isHost ? <button className="game-v2-remove-waiting" type="button" disabled={resultBusy || !connected} onClick={() => removeWaiting(player)} aria-label={t('removeWaitingPlayer', { name: player.name })} title={t('removeWaitingPlayer', { name: player.name })}><X size={17}/></button> : null}</div>
+        })}</div></details> : null}
+        {liveReaction && !isResolving && !preferences.reactionsMuted ? <div className="game-v2-live-reaction" role="status"><b><bdi dir="auto">{liveReaction.playerId === me.id ? t('you') : liveReaction.playerName}</bdi></b><span>{reactionLabel(liveReaction.reaction, t)}</span></div> : null}
+        <div className="game-v2-center" onKeyDown={(event) => { if (event.key === 'Escape' && explanationOpen) { event.preventDefault(); setExplanationOpen(false); explanationButtonRef.current?.focus() } }}>
+          <div className="game-v2-piles"><div className="game-v2-waste" aria-label={t('cardsInWaste', { count: game.wasteCount })}><div className="game-v2-card-back"/><b>{game.wasteCount}<span>{t('waste')}</span></b></div><div className={`game-v2-trick ${isResolving ? 'is-resolved' : ''} ${isResolving && resolutionCountdown.milliseconds <= 240 ? 'is-clearing' : ''}`} aria-label={isResolving ? t('completedTrickLabel') : t('currentTrickLabel')}>{visibleTrick.length === 0 ? <div className="game-v2-empty-trick"><span aria-hidden="true">♠</span><p>{game.firstTrick ? t('aceOpens') : t('leadAnySuit')}</p></div> : visibleTrick.map((entry, index) => <div className={`game-v2-trick-card ${game.resolvedTrick?.lastPlayerId === entry.playerId ? 'is-last-played' : ''}`} key={`${entry.playerId}-${entry.card.id}`} style={{ '--trick-index': index } as CSSProperties}><PlayingCard card={entry.card} t={t} small/><span><bdi dir="auto">{entry.playerId === me.id ? t('you') : entry.playerName}</bdi></span></div>)}{isResolving && game.resolvedTrick ? <div className={`game-v2-resolution game-v2-resolution--${game.resolvedTrick.kind}`} aria-hidden="true"><Clock3 size={14}/><b>{resolutionCountdown.seconds}s</b></div> : null}</div></div>
           <p className="sr-only" aria-live="polite">{trickSummary}</p>
-          {!isReconnectPause ? <div className={`game-v2-status ${isMyTurn ? 'is-mine' : ''} ${isThullaResolution ? 'is-thulla' : ''}`} aria-live="polite"><div><span>{isThullaResolution ? `THULLA! · ${t('nextTrick')}` : isResolving ? t('nextTrick') : isMyTurn ? t('yourTurn') : game.firstTrick ? t('openingTrick') : t('currentTurn')}</span><b>{tableMessage}</b></div>{game.phase === 'turn' && room.status === 'playing' && game.turnEndsAt !== null ? <TurnClock endsAt={game.turnEndsAt} duration={room.settings.turnSeconds * 1_000} t={t} alertForYou={isMyTurn} sound={preferences.sound} haptics={preferences.haptics}/> : null}</div> : null}
-          {canReviewExplanation ? <div className="game-v2-explanation" onKeyDown={(event) => { if (event.key === 'Escape' && explanationOpen) { event.preventDefault(); setExplanationOpen(false) } }}><button ref={explanationButtonRef} type="button" aria-expanded={explanationOpen} aria-controls="game-v2-explanation-copy" onClick={() => setExplanationOpen((value) => !value)}><Help size={17}/> {explanationOpen ? t('hideExplanation') : t('whatHappened')}</button>{explanationOpen ? <p ref={explanationPanelRef} id="game-v2-explanation-copy" tabIndex={-1}>{lastExplanation}</p> : null}</div> : null}
+          {isReconnectPause ? <div className="game-v2-reconnect-banner" role="group" aria-label={t('disconnectedPaused', { name: reconnectPlayer?.name ?? t('player') })}><WifiOff size={21}/><div><b>{t('waitingReconnect', { name: reconnectPlayer?.name ?? t('player'), count: reconnectCountdown.seconds })}</b><span>{t('reconnectPaused')}</span></div>{me.isHost && reconnectPlayer ? <button type="button" disabled={resultBusy || !connected} onClick={replaceWithBot}>{t('replaceBot')}</button> : null}</div> : null}
+          {!isReconnectPause ? <><span className="sr-only" aria-live="polite" aria-atomic="true">{statusLabel}. {tableMessage}</span><div ref={gameStatusRef} className={`game-v2-status ${isMyTurn ? 'is-mine' : ''} ${isThullaResolution ? 'is-thulla' : ''}`} tabIndex={-1}><div className="game-v2-status__copy">{explanationOpen ? <div className="game-v2-explanation"><p ref={explanationPanelRef} id="game-v2-explanation-copy" tabIndex={-1}>{lastExplanation}</p></div> : <><span>{statusLabel}</span><b>{tableMessage}</b></>}</div><div className="game-v2-status__actions">{game.phase === 'turn' && room.status === 'playing' && game.turnEndsAt !== null ? <TurnClock endsAt={game.turnEndsAt} duration={room.settings.turnSeconds * 1_000} t={t} alertForYou={isMyTurn} sound={preferences.sound} haptics={preferences.haptics}/> : null}{canReviewExplanation ? <button ref={explanationButtonRef} className="game-v2-explanation-toggle" type="button" aria-expanded={explanationOpen} aria-controls="game-v2-explanation-copy" aria-label={explanationOpen ? t('hideExplanation') : t('whatHappened')} title={explanationOpen ? t('hideExplanation') : t('whatHappened')} onClick={() => setExplanationOpen((value) => !value)}><Help size={17}/><span>{explanationOpen ? t('hideExplanation') : t('whatHappened')}</span></button> : null}</div></div></> : null}
         </div>
         {game.leadSuit && !isResolving ? <div className={`game-v2-lead game-v2-lead--${game.leadSuit}`}><span>{suitSymbol[game.leadSuit]}</span><b>{t('follow', { suit: localizedSuit(t, game.leadSuit) })}</b></div> : null}
         <MatchActivity items={game.activity} players={room.players} open={activityOpen} onToggle={() => setActivityOpen((value) => !value)} t={t}/>
       </section>
       {!me.waitingForNextRound && !isFinished ? <section id="game-v2-hand" className={`game-v2-hand ${!connected ? 'is-disconnected' : ''}`} aria-label={t('yourHand')} tabIndex={-1}>
-        <div className="game-v2-hand__meta"><div><span>{t('yourHand')}</span><b>{t(game.hand.length === 1 ? 'card' : 'cards', { count: game.hand.length })}</b>{scrollHint ? <span className="game-v2-hand-scroll-hint" role="status">↔ {t('swipeHint')}</span> : null}</div>{me.escaped ? <span className="game-v2-safe"><Check size={17}/> {t('gotAway')}</span> : isMyTurn ? <span className="game-v2-your-turn">{t('yourTurn')}</span> : null}</div>
-        <div ref={handRef} className={`game-v2-hand__scroller ${handOverflow ? 'has-overflow' : ''}`} onScroll={markScrolled}><div className="game-v2-hand__cards">{sortCards(game.hand).map((card) => { const legal = legalIds.has(card.id); return <PlayingCard key={card.id} card={card} t={t} interactive selectable={canAct && legal} selected={selectedCardId === card.id} unavailable={isMyTurn && connected && !legal} disabled={!canAct || !legal} onClick={() => setSelectedCardId(card.id === selectedCardId ? null : card.id)}/> })}{game.hand.length === 0 ? <div className="game-v2-empty-hand"><Check size={25}/><p>{me.escaped ? t('youGotAway') : t('powerOnTable')}</p></div> : null}</div></div>
+        <div className="game-v2-hand__meta"><div><span>{t('yourHand')}</span><b>{t(game.hand.length === 1 ? 'card' : 'cards', { count: game.hand.length })}</b>{scrollHint ? <span className="game-v2-hand-scroll-hint" role="status">↔ {t('swipeHint')}</span> : null}</div>{me.escaped ? <span className="game-v2-safe"><Check size={17}/> {t('gotAway')}</span> : null}</div>
+        <div ref={handRef} className={`game-v2-hand__scroller ${handOverflow ? 'has-overflow' : ''}`} onScroll={markHandScrolled}><div className="game-v2-hand__cards">{sortCards(game.hand).map((card) => { const legal = legalIds.has(card.id); return <PlayingCard key={card.id} card={card} t={t} interactive selectable={canAct && legal} selected={selectedCardId === card.id} unavailable={isMyTurn && connected && !legal} disabled={!canAct || !legal} onClick={() => setSelectedCardId(card.id === selectedCardId ? null : card.id)}/> })}{game.hand.length === 0 ? <div className="game-v2-empty-hand"><Check size={25}/><p>{me.escaped ? t('youGotAway') : t('powerOnTable')}</p></div> : null}</div></div>
         {!isResolving && !isReconnectPause ? <div className={`game-v2-action-bar ${game.canTakeRightHand && canAct ? 'has-take' : ''}`}><p>{!connected ? t('reconnectingServer') : isMyTurn ? selectedCard ? t('cardSelected', { rank: selectedCard.rank, suit: localizedSuit(t, selectedCard.suit) }) : game.canTakeRightHand ? t('leadOrTakePlayer', { name: takeTarget?.name ?? t('player') }) : t('chooseLegalCard') : t('waitingForPlayer', { name: currentPlayer?.name ?? t('player') })}</p><div className="game-v2-actions">{game.canTakeRightHand && takeTarget && canAct ? <button className="game-v2-button game-v2-button--take" type="button" disabled={taking || playing} onClick={() => setTakeConfirmOpen(true)}><HandCards size={19}/> {t('takeHand', { name: takeTarget.name, count: takeTarget.cardCount })}</button> : null}{selectedCard && canAct ? <button className="game-v2-button game-v2-button--primary" type="button" disabled={playing || taking} onClick={() => void playSelected()}>{playing ? <span className="spinner"/> : <Play size={19} fill="currentColor"/>} {t('playNamedCard', { card: `${selectedCard.rank}${suitSymbol[selectedCard.suit]}` })}</button> : null}</div></div> : null}
-      </section> : me.waitingForNextRound && !isFinished ? <section id="game-v2-waiting-player" className="game-v2-waiting-player" tabIndex={-1} aria-labelledby="game-v2-waiting-title"><div><span className="game-v2-eyebrow">{t('gameInProgress')}</span><h2 id="game-v2-waiting-title">{t('joinNextRoundTitle')}</h2><p>{t('joinNextRoundBody', { count: me.joinedInRound, round: me.joinedInRound })}</p></div><div className="game-v2-waiting-player__actions"><span>{me.rematchReady ? <Check size={18}/> : <Wifi size={18}/>} {me.rematchReady ? t('readyForNextRound') : t('watchingTable')}</span><button className={`game-v2-button ${me.rematchReady ? 'game-v2-button--secondary' : 'game-v2-button--primary'}`} type="button" disabled={resultBusy || !connected} onClick={() => void resultAction('game:rematch-ready', { ready: !me.rematchReady })}>{me.rematchReady ? t('notReady') : t('rematchReady')}</button></div></section> : null}
+      </section> : me.waitingForNextRound && !isFinished ? <section id="game-v2-waiting-player" className="game-v2-waiting-player" tabIndex={-1} aria-labelledby="game-v2-waiting-title" aria-describedby="game-v2-waiting-copy game-v2-waiting-status"><div><span className="game-v2-eyebrow">{t('gameInProgress')}</span><h2 id="game-v2-waiting-title">{t('joinNextRoundTitle')}</h2><p id="game-v2-waiting-copy">{t('joinNextRoundBody', { count: me.joinedInRound, round: me.joinedInRound })}</p></div><div className="game-v2-waiting-player__actions"><span id="game-v2-waiting-status">{me.rematchReady ? <Check size={18}/> : <Clock3 size={18}/>} {me.rematchReady ? t('youAreReady') : t('youAreNotReady')}</span><button className={`game-v2-button ${me.rematchReady ? 'game-v2-button--secondary' : 'game-v2-button--primary'}`} type="button" disabled={resultBusy || !connected} onClick={() => void resultAction('game:rematch-ready', { ready: !me.rematchReady })}>{me.rematchReady ? t('cancelReadiness') : t('markReadyForNextRound')}</button></div></section> : null}
     </div>
     {isFinished ? <RoundResult room={room} me={me} loser={loser} busy={resultBusy || !connected} t={t} onReady={() => void resultAction('game:rematch-ready', { ready: !me.rematchReady })} onRestart={() => void resultAction('game:start')} onReset={resetSession} onRemoveWaiting={removeWaiting}/> : null}
     {takeConfirmOpen && takeTarget ? <TakeHandDialog target={takeTarget} taking={taking} activeCount={activePlayers.filter((player) => !player.escaped).length} t={t} onCancel={() => setTakeConfirmOpen(false)} onConfirm={() => void takeRightHand()}/> : null}
-    {preferenceOpen && !isFinished ? <PreferenceDialog language={language} t={t} preferences={preferences} isHost={me.isHost} chatSupported={chatSupported} chatMode={room.settings.chatMode} chatModeBusy={chatModeBusy} onLanguage={onLanguage} onPreference={onPreference} onChatMode={(chatMode) => void updateChatMode(chatMode)} onClose={() => setPreferenceOpen(false)}/> : null}
+    {preferenceOpen && !preferencesBlocked ? <PreferenceDialog language={language} t={t} preferences={preferences} isHost={me.isHost} chatSupported={chatSupported} chatMode={room.settings.chatMode} chatModeBusy={chatModeBusy} onLanguage={onLanguage} onPreference={onPreference} onChatMode={(chatMode) => void updateChatMode(chatMode)} onClose={() => setPreferenceOpen(false)}/> : null}
   </main>
 }

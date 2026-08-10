@@ -51,6 +51,17 @@ export function makeQaRoom(mode: string | null): ClientRoomView | null {
     })
     return room
   }
+  if (mode === 'many-players') {
+    const extraNames = ['Nouman', 'Hira', 'Danish', 'Mehwish', 'Sana']
+    extraNames.forEach((name, index) => {
+      room.players.push({
+        id: `p${index + 4}`, name, cardCount: 4 + (index % 4), connected: true, escaped: false,
+        isHost: false, isYou: false, ready: true, isBot: false, rematchReady: true,
+        reconnecting: false, reconnectEndsAt: null, waitingForNextRound: false, joinedInRound: 1,
+      })
+    })
+    return room
+  }
   if (mode === 'waiting') {
     room.players.forEach((player) => { player.isYou = false })
     room.players.push({

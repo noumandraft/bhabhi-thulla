@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode, type SVGProps } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode, type SVGProps } from 'react'
 import { io, type Socket } from 'socket.io-client'
 import {
   PROTOCOL_VERSION,
@@ -13,6 +13,7 @@ import {
 } from '../shared/game'
 import GameTable from './components/GameTable'
 import { AccessibleDialog } from './components/AccessibleDialog'
+import { LandingSeoContent } from './components/LandingSeoContent'
 import { TableTalk, type TableTalkLabels } from './components/TableTalk'
 import { Tutorial } from './components/Tutorial'
 import { chatAttemptFor, countUnreadChatMessages, mergeChatMessages, reconcileChatHistory, type PendingChatAttempt } from './chatModel'
@@ -37,6 +38,7 @@ const Clock3 = (props: IconProps) => <Icon {...props}><circle cx="12" cy="12" r=
 const Copy = (props: IconProps) => <Icon {...props}><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></Icon>
 const Crown = (props: IconProps) => <Icon {...props}><path d="m3 6 4 5 5-7 5 7 4-5-2 12H5z"/><path d="M5 21h14"/></Icon>
 const LogOut = (props: IconProps) => <Icon {...props}><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/><path d="M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/></Icon>
+const MoreHorizontal = (props: IconProps) => <Icon {...props}><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></Icon>
 const Info = (props: IconProps) => <Icon {...props}><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></Icon>
 const Play = (props: IconProps) => <Icon {...props}><path d="m7 4 13 8L7 20z"/></Icon>
 const Share2 = (props: IconProps) => <Icon {...props}><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/></Icon>
@@ -118,6 +120,42 @@ function LanguageSelect({ language, onChange, t }: { language: Language; onChang
   return <label className="language-select"><span className="sr-only">{t('language')}</span><select value={language} onChange={(event) => onChange(event.target.value as Language)} aria-label={t('language')}><option value="en">{t('english')}</option><option value="roman">{t('romanUrdu')}</option><option value="ur">{t('urdu')}</option></select></label>
 }
 
+function HeaderOverflow({ t, onOpenRules, onLeave }: { t: TFunction; onOpenRules: () => void; onLeave: () => void }) {
+  const detailsRef = useRef<HTMLDetailsElement>(null)
+  const label = t('moreOptions')
+
+  useEffect(() => {
+    function closeOutside(event: PointerEvent) {
+      if (detailsRef.current?.open && !detailsRef.current.contains(event.target as Node)) detailsRef.current.open = false
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key !== 'Escape' || !detailsRef.current?.open) return
+      event.preventDefault()
+      detailsRef.current.open = false
+      detailsRef.current.querySelector<HTMLElement>('summary')?.focus()
+    }
+    document.addEventListener('pointerdown', closeOutside)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [])
+
+  function choose(action: () => void) {
+    if (detailsRef.current) detailsRef.current.open = false
+    action()
+  }
+
+  return <details ref={detailsRef} className="header-overflow">
+    <summary className="icon-button" aria-label={label} title={label}><MoreHorizontal size={21}/></summary>
+    <div className="header-overflow__menu">
+      <button type="button" onClick={() => choose(onOpenRules)}><BookOpen size={19}/><span>{t('howToPlay')}</span></button>
+      <button type="button" onClick={() => choose(onLeave)}><LogOut size={19}/><span>{t('leaveTable')}</span></button>
+    </div>
+  </details>
+}
+
 function RulesModal({ t, onClose }: { t: TFunction; onClose: () => void }) {
   const rules = [
     ['ruleAceTitle', 'ruleAceBody'], ['ruleRightTitle', 'ruleRightBody'], ['ruleThullaTitle', 'ruleThullaBody'],
@@ -176,43 +214,61 @@ function Landing({ socket, connected, inviteCode, t, language, onLanguage, onEnt
 
   async function submit(event: FormEvent) { event.preventDefault(); await enterRoom(false) }
 
-  return <main className="landing-shell">
-    <nav className="landing-nav"><Logo compact/><div className="landing-nav__actions"><LanguageSelect language={language} onChange={onLanguage} t={t}/><button className="text-button" type="button" onClick={onOpenRules}><BookOpen size={18}/> {t('howToPlay')}</button></div></nav>
-    <div className="landing-grid">
-      <section className="mobile-hero-intro">
-        <div className="hero-kicker"><span className="live-dot"/> {t('privateRooms')}</div>
-        <h1>{t('heroLineOne')}<br/><em>{t('heroLineTwo').split(' ')[0]}</em> {t('heroLineTwo').split(' ').slice(1).join(' ')}</h1>
-        <p>{t('heroDescription')}</p>
-      </section>
+  function focusCreateRoom() {
+    setMode('create')
+    setError('')
+    window.requestAnimationFrame(() => {
+      const joinCard = document.getElementById('play-bhabhi-thulla')
+      const nameInput = document.getElementById('player-name') as HTMLInputElement | null
+      joinCard?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' })
+      nameInput?.focus({ preventScroll: true })
+    })
+  }
+
+  return <>
+    <main className="landing-shell">
+      <nav className="landing-nav"><Logo compact/><div className="landing-nav__actions"><LanguageSelect language={language} onChange={onLanguage} t={t}/><button className="text-button" type="button" onClick={onOpenRules}><BookOpen size={18}/> {t('howToPlay')}</button></div></nav>
+      <div className="landing-grid">
       <section className="hero-copy">
-        <div className="hero-kicker"><span className="live-dot"/> {t('privateRooms')}</div>
-        <h1>{t('heroLineOne')}<br/><em>{t('heroLineTwo').split(' ')[0]}</em> {t('heroLineTwo').split(' ').slice(1).join(' ')}</h1>
-        <p>{t('heroDescription')}</p>
-        <div className="hero-cards" aria-hidden="true"><div className="hero-card hero-card--one"><span>A</span><i>♠</i></div><div className="hero-card hero-card--two"><span>K</span><i>♥</i></div><div className="hero-card hero-card--three"><span>7</span><i>♦</i></div></div>
-        <div className="trust-row"><span><ShieldCheck size={18}/> {t('serverChecked')}</span><span><Users size={18}/> {t('playerCount')}</span><span><Clock3 size={18}/> {t('roundLength')}</span></div>
+        <div className="hero-copy__intro">
+          <div className="hero-kicker"><span className="live-dot"/> {t('privateRooms')}</div>
+          <h1>{t('heroLineOne')}<br/><em>{t('heroLineTwo').split(' ')[0]}</em> {t('heroLineTwo').split(' ').slice(1).join(' ')}</h1>
+          <p>{t('heroDescription')}</p>
+        </div>
+        <div className="hero-copy__visuals">
+          <div className="hero-cards" aria-hidden="true"><div className="hero-card hero-card--one"><span>A</span><i>♠</i></div><div className="hero-card hero-card--two"><span>K</span><i>♥</i></div><div className="hero-card hero-card--three"><span>7</span><i>♦</i></div></div>
+          <div className="trust-row"><span><ShieldCheck size={18}/> {t('serverChecked')}</span><span><Users size={18}/> {t('playerCount')}</span><span><Clock3 size={18}/> {t('roundLength')}</span></div>
+        </div>
       </section>
-      <section className="join-card" aria-labelledby="join-heading">
+      <section className="join-card" id="play-bhabhi-thulla" aria-labelledby="join-heading">
         <div className="connection-label" data-connected={connected}><span>{connected ? <Wifi size={16}/> : <WifiOff size={16}/>} {connected ? t('serverReady') : wakeElapsed >= 8 ? t('wakingServerElapsed', { count: wakeElapsed }) : t('wakingServer')}</span>{!connected && wakeElapsed >= 8 ? <button type="button" onClick={() => { socket.disconnect(); socket.connect(); setWakeElapsed(0) }}>{t('retryConnection')}</button> : null}</div>
         <span className="eyebrow">{t('pullUpChair')}</span><h2 id="join-heading">{mode === 'create' ? t('startPrivate') : t('joinFriends')}</h2>
         <div className="mode-tabs" aria-label={t('chooseRoomAction')}><button type="button" aria-pressed={mode === 'create'} onClick={() => { setMode('create'); setError('') }}>{t('createRoom')}</button><button type="button" aria-pressed={mode === 'join'} onClick={() => { setMode('join'); setError('') }}>{t('joinRoom')}</button></div>
         <form onSubmit={submit}>
-          <label htmlFor="player-name">{t('yourName')}</label><input id="player-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={20} minLength={2} autoComplete="nickname" placeholder="e.g. Hamza" required/>
-          {mode === 'join' ? <><label htmlFor="room-code">{t('roomCode')}</label><input id="room-code" className="code-input" value={code} onChange={(event) => setCode(event.target.value.replace(/[^a-z0-9]/gi, '').toUpperCase().slice(0, 5))} maxLength={5} placeholder="ABCDE" autoCapitalize="characters" required/></> : null}
+          <label htmlFor="player-name">{t('yourName')}</label><input id="player-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={20} minLength={2} autoComplete="nickname" dir="auto" placeholder="e.g. Hamza" required/>
+          {mode === 'join' ? <><label htmlFor="room-code">{t('roomCode')}</label><input id="room-code" className="code-input" value={code} onChange={(event) => setCode(event.target.value.replace(/[^a-z0-9]/gi, '').toUpperCase().slice(0, 5))} maxLength={5} placeholder="ABCDE" autoCapitalize="characters" autoComplete="off" autoCorrect="off" spellCheck={false} enterKeyHint="go" inputMode="text" dir="ltr" required/></> : null}
           {error ? <p className="form-error" role="alert">{error}</p> : null}
           <button className="button button--primary button--wide" type="submit" disabled={loading || !connected}>{loading ? <><span className="spinner"/> {t('takingSeat')}</> : <>{mode === 'create' ? t('createPrivateRoom') : t('joinTable')} <ChevronRight size={20}/></>}</button>
         </form>
         <div className="practice-actions"><button className="button button--secondary button--wide" type="button" disabled={loading || !connected} onClick={() => void enterRoom(true)}><Bot size={20}/> {t('practiceBots')}</button><button className="text-button" type="button" onClick={onOpenTutorial}><BookOpen size={18}/> {t('interactiveTutorial')}</button></div>
         <p className="privacy-note">{t('privacy')}</p>
       </section>
-    </div>
-  </main>
+      </div>
+      <LandingSeoContent onCreateRoom={focusCreateRoom} onPractice={() => void enterRoom(true)} onOpenRules={onOpenRules} onOpenTutorial={onOpenTutorial}/>
+    </main>
+    <footer className="landing-footer" lang="en-PK" dir="ltr">
+      <div><Logo compact/><p>Play Pakistan's Bhabhi Thulla card game online with friends.</p></div>
+      <nav aria-label="Bhabhi Thulla information"><a href="#play-bhabhi-thulla">Play now</a><a href="#bhabhi-thulla-rules">Pakistani rules</a><button type="button" onClick={onOpenTutorial}>Interactive tutorial</button></nav>
+      <small>Free private multiplayer. No signup or public chat.</small>
+    </footer>
+  </>
 }
 
 function PlayerSeat({ player, host, busy, t, onKick, onRemoveBot }: { player: ClientPlayerView; host: boolean; busy: boolean; t: TFunction; onKick: (id: string) => void; onRemoveBot: (id: string) => void }) {
   const initials = player.name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()
   const status = player.ready ? t('playerReady') : player.reconnecting || !player.connected ? t('reconnecting') : t('notReady')
   return <div className={`player-seat ${player.ready ? 'is-ready' : ''} ${!player.connected ? 'is-offline' : ''}`}>
-    <div className="player-seat__avatar">{player.isBot ? <Bot size={19}/> : initials}</div><div className="player-seat__copy"><b>{player.name}{player.isYou ? ` (${t('you')})` : ''}</b><span>{player.isBot ? `${t('bot')} · ${status}` : status}</span></div>
+    <div className="player-seat__avatar">{player.isBot ? <Bot size={19}/> : initials}</div><div className="player-seat__copy"><b><bdi dir="auto">{player.name}</bdi>{player.isYou ? ` (${t('you')})` : ''}</b><span>{player.isBot ? `${t('bot')} · ${status}` : status}</span></div>
     {player.isHost ? <Crown className="host-crown" size={16} aria-label={t('host')}/> : null}
     {player.ready ? <Check className="ready-check" size={18} aria-label={t('playerReady')}/> : null}
     {host && !player.isYou && !player.isHost ? <button className="seat-remove" type="button" disabled={busy} aria-label={`${player.isBot ? t('removeBot') : t('removePlayer')}: ${player.name}`} onClick={() => {
@@ -251,11 +307,11 @@ function Lobby({ room, socket, t, language, chatSupported, onLanguage, onOpenRul
   const allReady = participants.length >= room.minPlayers && participants.every((player) => player.isBot || player.ready)
 
   return <main className="lobby-shell">
-    <header className="app-header"><Logo compact/><div className="header-actions"><LanguageSelect language={language} onChange={onLanguage} t={t}/><IconButton label={t('howToPlay')} onClick={onOpenRules}><BookOpen size={20}/></IconButton><IconButton label={t('leaveTable')} onClick={onLeave}><LogOut size={20}/></IconButton></div></header>
+    <header className="app-header"><Logo compact/><div className="header-actions"><LanguageSelect language={language} onChange={onLanguage} t={t}/><div className="header-actions__secondary"><IconButton label={t('howToPlay')} onClick={onOpenRules}><BookOpen size={20}/></IconButton><IconButton label={t('leaveTable')} onClick={onLeave}><LogOut size={20}/></IconButton></div><HeaderOverflow t={t} onOpenRules={onOpenRules} onLeave={onLeave}/></div></header>
     <section className="lobby-card lobby-card--expanded">
       <div className="lobby-card__intro"><span className="eyebrow">{t('pullUpChair')}</span><h1>{t('waitingGang')}</h1><p>{t('lobbyDescription')}</p></div>
-      <button className="room-code" type="button" onClick={() => void copyInvite()} aria-label={t('copyInviteRoom', { code: room.code })}><span>{t('roomCode')}</span><b>{room.code}</b><Copy size={19}/></button>
-      <div className="seat-progress" aria-label={t('seatsFilled', { count: connectedCount, total: room.maxPlayers })}>{Array.from({ length: room.maxPlayers }, (_, index) => <i key={index} className={index < connectedCount ? 'is-filled' : ''}/>)}</div>
+      <button className="room-code" type="button" onClick={() => void copyInvite()} aria-label={t('copyInviteRoom', { code: room.code })}><span>{t('roomCode')}</span><b dir="ltr">{room.code}</b><Copy size={19}/></button>
+      <div className="seat-progress" role="progressbar" aria-label={t('seatsFilled', { count: connectedCount, total: room.maxPlayers })} aria-valuemin={0} aria-valuemax={room.maxPlayers} aria-valuenow={connectedCount} aria-valuetext={t('seatsFilled', { count: connectedCount, total: room.maxPlayers })}>{Array.from({ length: room.maxPlayers }, (_, index) => <i key={index} className={index < connectedCount ? 'is-filled' : ''}/>)}</div>
       <div className="lobby-content-grid">
         <div>
           <div className="lobby-players">{room.players.map((player) => <PlayerSeat key={player.id} player={player} host={me.isHost} busy={busy} t={t} onKick={(playerId) => void act('room:kick', { playerId }, t('removePlayerFailed'))} onRemoveBot={(playerId) => void act('room:remove-bot', { playerId }, t('removeBotFailed'))}/>)}{Array.from({ length: Math.max(0, 3 - room.players.length) }, (_, index) => <div className="empty-seat" key={index}><span>+</span><p>{t('waitingPlayer')}</p></div>)}</div>
@@ -269,8 +325,8 @@ function Lobby({ room, socket, t, language, chatSupported, onLanguage, onOpenRul
           {!me.isHost ? <small>{t('onlyHostSettings')}</small> : null}
         </fieldset>
       </div>
-      {scores.length ? <div className="lobby-score-preview"><b>{t('sessionScore')}</b><span>{t('round', { count: room.session?.roundNumber ?? 1 })}</span>{scores.slice(0, 3).map((score) => <p key={score.playerId}><span>{score.playerName}</span><b>{score.escapes} {t('gotAway')} · {score.bhabhiCount} {t('bhabhi')}</b></p>)}</div> : null}
-      <div className="lobby-actions"><button className="button button--secondary" type="button" onClick={() => void copyInvite()}><Share2 size={19}/> {t('copyInvite')}</button><button className={`button ${me.ready ? 'button--secondary' : 'button--primary'}`} type="button" disabled={busy} onClick={() => void act('room:ready', { ready: !me.ready }, t('readyUpdateFailed'))}><Check size={19}/> {me.ready ? t('notReady') : t('playerReady')}</button>{me.isHost ? <button className="button button--primary" type="button" disabled={!room.canStart || !allReady || busy} onClick={() => void act('game:start', {}, t('startFailed'))}><Play size={19} fill="currentColor"/> {busy ? t('shuffling') : t('dealCards')}</button> : <p className="host-wait">{t('waitingHost')}</p>}</div>
+      {scores.length ? <div className="lobby-score-preview"><b>{t('sessionScore')}</b><span>{t('round', { count: room.session?.roundNumber ?? 1 })}</span>{scores.slice(0, 3).map((score) => <p key={score.playerId}><span><bdi dir="auto">{score.playerName}</bdi></span><b>{score.escapes} {t('gotAway')} · {score.bhabhiCount} {t('bhabhi')}</b></p>)}</div> : null}
+      <div className="lobby-actions"><button className="button button--secondary" type="button" onClick={() => void copyInvite()}><Share2 size={19}/> {t('copyInvite')}</button><button className={`button ${me.ready ? 'button--secondary' : 'button--primary'}`} type="button" disabled={busy} onClick={() => void act('room:ready', { ready: !me.ready }, t('readyUpdateFailed'))}><Check size={19}/> {me.ready ? t('cancelReadiness') : t('playerReady')}</button>{me.isHost ? <button className="button button--primary" type="button" disabled={!room.canStart || !allReady || busy} onClick={() => void act('game:start', {}, t('startFailed'))}><Play size={19} fill="currentColor"/> {busy ? t('shuffling') : t('dealCards')}</button> : <p className="host-wait">{t('waitingHost')}</p>}</div>
       <p className="lobby-hint"><Users size={17}/>{connectedCount < 3 ? t('needPlayers', { count: 3 - connectedCount }) : allReady ? t('readyToDeal') : t('needReady')}</p>
     </section>
   </main>
@@ -311,6 +367,9 @@ export default function App() {
   const t = useMemo<TFunction>(() => (key, values) => translate(language, key, values), [language])
   const showToast = useCallback<ShowToast>((message, tone = 'info') => setToast({ message, tone }), [])
   const displayedRoom = qaRoom ?? room
+  const auxiliaryOverlaysBlocked = displayedRoom?.status === 'finished' || displayedRoom?.game?.phase === 'resolving'
+  const auxiliaryOverlaysBlockedRef = useRef(auxiliaryOverlaysBlocked)
+  auxiliaryOverlaysBlockedRef.current = auxiliaryOverlaysBlocked
   const chatSupported = Boolean(qaRoom) || serverCapabilities.includes('chat-v1')
   const clearSeat = useCallback((code: string | undefined, message = '') => {
     if (code) localStorage.removeItem(`thulla:seat:${code}`)
@@ -331,7 +390,7 @@ export default function App() {
     clearRoomFromUrl()
   }, [])
 
-  useEffect(() => { languageRef.current = language; localStorage.setItem('thulla:language', language); document.documentElement.lang = language === 'ur' ? 'ur' : 'en'; document.documentElement.dir = languageDirection(language) }, [language])
+  useEffect(() => { languageRef.current = language; localStorage.setItem('thulla:language', language); document.documentElement.lang = language === 'ur' ? 'ur-PK' : language === 'roman' ? 'ur-Latn-PK' : 'en'; document.documentElement.dir = languageDirection(language) }, [language])
   useEffect(() => { credentialsRef.current = credentials }, [credentials])
   useEffect(() => {
     if (!reconnecting || displayedRoom) { setRestoreElapsed(0); return }
@@ -340,6 +399,12 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [displayedRoom, reconnecting])
   useEffect(() => {
+    if (qaRoom) {
+      // Deterministic visual fixtures do not need a live Socket.IO connection.
+      // Avoid opening a fresh connection on every QA viewport navigation.
+      setConnected(true)
+      return () => setConnected(false)
+    }
     let attemptedForConnection = false
     async function restoreSeat() {
       setConnected(true); const saved = credentialsRef.current
@@ -394,7 +459,7 @@ export default function App() {
     socket.on('connect', restoreSeat); socket.on('disconnect', onDisconnect); socket.on('server:hello', onHello); socket.on('room:state', onState); socket.on('room:reaction', onReaction); socket.on('room:chat:message', onChatMessage); socket.on('room:kicked', onKicked)
     if (socket.connected) void restoreSeat(); else socket.connect()
     return () => { socket.off('connect', restoreSeat); socket.off('disconnect', onDisconnect); socket.off('server:hello', onHello); socket.off('room:state', onState); socket.off('room:reaction', onReaction); socket.off('room:chat:message', onChatMessage); socket.off('room:kicked', onKicked); socket.disconnect() }
-  }, [clearSeat, socket])
+  }, [clearSeat, qaRoom, socket])
   useEffect(() => { chatMessagesRef.current = chatMessages }, [chatMessages])
   useEffect(() => {
     const code = displayedRoom?.code ?? null
@@ -451,9 +516,10 @@ export default function App() {
   useEffect(() => { if (!reaction) return; const timeout = window.setTimeout(() => setReaction(null), 2800); return () => window.clearTimeout(timeout) }, [reaction?.id])
 
   const activeRoomSettings = displayedRoom ? roomSettings(displayedRoom) : DEFAULT_ROOM_SETTINGS
-  const tableTalkAvailable = Boolean(displayedRoom) && displayedRoom?.status !== 'finished' && displayedRoom?.game?.phase !== 'resolving'
+  const tableTalkAvailable = Boolean(displayedRoom) && !auxiliaryOverlaysBlocked
   const quickTalkEnabled = Boolean(displayedRoom) && activeRoomSettings.reactionsEnabled && (!chatSupported || activeRoomSettings.chatMode !== 'off')
   const textTalkEnabled = Boolean(displayedRoom) && chatSupported && activeRoomSettings.chatMode === 'text'
+  const gameChatOpen = Boolean(tableTalkOpen && tableTalkAvailable && displayedRoom?.status === 'playing')
   const visibleReaction = reaction && !mutedChatPlayerIds.includes(reaction.playerId) ? reaction : null
   const isMyTurn = Boolean(displayedRoom?.game?.phase === 'turn' && displayedRoom.game.currentTurnId === displayedRoom.yourPlayerId)
   const tableTalkParticipants = useMemo(() => displayedRoom?.players.map((player) => ({ id: player.id, name: player.name, canMute: !player.isBot })) ?? [], [displayedRoom?.players])
@@ -491,9 +557,14 @@ export default function App() {
     mutedCount: (count) => t('mutedCount', { count }),
   }), [t])
   const formatChatTime = useMemo(() => {
-    const formatter = new Intl.DateTimeFormat(language === 'ur' ? 'ur-PK' : 'en-PK', { hour: 'numeric', minute: '2-digit' })
+    const formatter = new Intl.DateTimeFormat(language === 'ur' ? 'ur-PK' : language === 'roman' ? 'ur-Latn-PK' : 'en-PK', { hour: 'numeric', minute: '2-digit' })
     return (createdAt: number) => formatter.format(new Date(createdAt))
   }, [language])
+
+  useLayoutEffect(() => {
+    document.body.classList.toggle('has-game-chat-open', gameChatOpen)
+    return () => document.body.classList.remove('has-game-chat-open')
+  }, [gameChatOpen])
 
   useEffect(() => {
     if (!tableTalkAvailable || (!quickTalkEnabled && !textTalkEnabled)) setTableTalkOpen(false)
@@ -505,11 +576,56 @@ export default function App() {
     setTutorialOpen(false)
   }, [isMyTurn])
   useEffect(() => {
-    if (displayedRoom?.game?.phase !== 'resolving' && displayedRoom?.status !== 'finished') return
+    if (!auxiliaryOverlaysBlocked) return
+    const hadOpenOverlay = rulesOpen || tutorialOpen || tableTalkOpen
     setRulesOpen(false)
     setTutorialOpen(false)
     setTableTalkOpen(false)
-  }, [displayedRoom?.game?.phase, displayedRoom?.status])
+    if (!hadOpenOverlay) return
+    let secondFrame = 0
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        const selector = displayedRoom?.status === 'finished'
+          ? '#round-result-title'
+          : '#game-v2-hand, #game-v2-waiting-player'
+        const target = document.querySelector<HTMLElement>(selector)
+        if (target?.isConnected && !target.closest('[inert], [aria-hidden="true"]')) target.focus({ preventScroll: true })
+      })
+    })
+    return () => {
+      window.cancelAnimationFrame(firstFrame)
+      if (secondFrame) window.cancelAnimationFrame(secondFrame)
+    }
+  }, [auxiliaryOverlaysBlocked])
+
+  function openRules() {
+    if (auxiliaryOverlaysBlocked) return
+    setTutorialOpen(false)
+    if (!tableTalkOpen) {
+      setRulesOpen(true)
+      return
+    }
+    setTableTalkOpen(false)
+    // Let Table Talk restore its trigger before the modal takes ownership of
+    // focus; otherwise its deferred cleanup could pull focus out of the rules.
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      if (!auxiliaryOverlaysBlockedRef.current) setRulesOpen(true)
+    }))
+  }
+
+  function openTutorial() {
+    if (auxiliaryOverlaysBlocked) return
+    setRulesOpen(false)
+    setTableTalkOpen(false)
+    setTutorialOpen(true)
+  }
+
+  function openTableTalk() {
+    if (!tableTalkAvailable) return
+    setRulesOpen(false)
+    setTutorialOpen(false)
+    setTableTalkOpen(true)
+  }
 
   function entered(next: RoomCredentials) { saveCredentials(next); setCredentials(next); credentialsRef.current = next; setEntryError('') }
   async function leaveRoom() {
@@ -574,8 +690,8 @@ export default function App() {
   if (reconnecting && !displayedRoom) return <main className="loading-screen"><Logo/><span className="spinner spinner--large"/><div className="loading-screen__copy"><p>{t('findingSeat')}</p>{restoreElapsed >= 8 ? <small>{t('findingSeatElapsed', { count: restoreElapsed })}</small> : null}</div>{restoreElapsed >= 12 ? <div className="loading-screen__actions"><button className="button button--primary" type="button" onClick={() => { socket.disconnect(); socket.connect(); setRestoreElapsed(0) }}>{t('retryConnection')}</button><button className="button button--secondary" type="button" onClick={() => clearSeat(credentials?.code, t('seatRestoreAbandoned'))}>{t('forgetSavedSeat')}</button></div> : null}</main>
 
   return <>
-    {!displayedRoom ? <><Landing socket={socket} connected={connected} inviteCode={inviteCode} t={t} language={language} onLanguage={setLanguage} onEntered={entered} onOpenRules={() => setRulesOpen(true)} onOpenTutorial={() => setTutorialOpen(true)} onToast={showToast}/>{entryError ? <div className="entry-banner" role="alert">{entryError}</div> : null}</> : displayedRoom.status === 'lobby' ? <Lobby room={displayedRoom} socket={socket} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} onOpenRules={() => setRulesOpen(true)} onLeave={leaveRoom} onToast={showToast}/> : <GameTable room={displayedRoom} socket={socket} connected={connected} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} preferences={preferences} onPreference={updatePreference} liveReaction={visibleReaction} onOpenRules={() => setRulesOpen(true)} onLeave={leaveRoom} onToast={showToast}/>}
-    {displayedRoom?.status === 'lobby' && visibleReaction && !preferences.reactionsMuted ? <div className={`table-talk__lobby-reaction ${tableTalkOpen ? 'is-drawer-open' : ''}`} role="status" aria-live="polite"><b>{visibleReaction.playerId === displayedRoom.yourPlayerId ? t('you') : visibleReaction.playerName}</b><span>{reactionLabel(visibleReaction.reaction, t)}</span></div> : null}
+    {!displayedRoom ? <><Landing socket={socket} connected={connected} inviteCode={inviteCode} t={t} language={language} onLanguage={setLanguage} onEntered={entered} onOpenRules={openRules} onOpenTutorial={openTutorial} onToast={showToast}/>{entryError ? <div className="entry-banner" role="alert">{entryError}</div> : null}</> : displayedRoom.status === 'lobby' ? <Lobby room={displayedRoom} socket={socket} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/> : <GameTable room={displayedRoom} socket={socket} connected={connected} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} preferences={preferences} onPreference={updatePreference} liveReaction={visibleReaction} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/>}
+    {displayedRoom?.status === 'lobby' && visibleReaction && !preferences.reactionsMuted ? <div className={`table-talk__lobby-reaction ${tableTalkOpen ? 'is-drawer-open' : ''}`} role="status" aria-live="polite"><b><bdi dir="auto">{visibleReaction.playerId === displayedRoom.yourPlayerId ? t('you') : visibleReaction.playerName}</bdi></b><span>{reactionLabel(visibleReaction.reaction, t)}</span></div> : null}
     {displayedRoom && tableTalkAvailable ? <TableTalk
       className={`table-talk--${displayedRoom.status === 'lobby' ? 'lobby' : 'game'}`}
       open={tableTalkOpen}
@@ -594,7 +710,7 @@ export default function App() {
       formatTime={formatChatTime}
       draft={chatDraft}
       sendError={!qaRoom && !connected ? t('offlineChat') : chatSendError || null}
-      onOpen={() => setTableTalkOpen(true)}
+      onOpen={openTableTalk}
       onClose={() => setTableTalkOpen(false)}
       onReturnToCards={() => window.requestAnimationFrame(() => document.getElementById('game-v2-hand')?.focus())}
       onDraftChange={changeChatDraft}
@@ -604,8 +720,8 @@ export default function App() {
       onTogglePlayerMute={toggleChatPlayerMute}
       onMessagesRead={(sequence) => setLastReadChatSequence((current) => Math.max(current, sequence))}
     /> : null}
-    {rulesOpen ? <RulesModal t={t} onClose={() => setRulesOpen(false)}/> : null}
-    {tutorialOpen ? <Tutorial t={t} onClose={() => setTutorialOpen(false)} onComplete={() => updatePreference('tutorialComplete', true)}/> : null}
+    {!auxiliaryOverlaysBlocked && rulesOpen ? <RulesModal t={t} onClose={() => setRulesOpen(false)}/> : null}
+    {!auxiliaryOverlaysBlocked && tutorialOpen ? <Tutorial t={t} onClose={() => setTutorialOpen(false)} onComplete={() => updatePreference('tutorialComplete', true)}/> : null}
     {toast ? <div className={`toast toast--${toast.tone}`} data-tone={toast.tone} role={toast.tone === 'error' ? 'alert' : 'status'} aria-live={toast.tone === 'error' ? 'assertive' : 'polite'}>{toast.tone === 'success' ? <Check size={18}/> : toast.tone === 'error' ? <CircleAlert size={18}/> : <Info size={18}/>} {toast.message}</div> : null}
   </>
 }

@@ -257,7 +257,7 @@ export function TableTalk({
   const closeRef = useRef<HTMLButtonElement>(null)
   const quickTabRef = useRef<HTMLButtonElement>(null)
   const chatTabRef = useRef<HTMLButtonElement>(null)
-  const messageListRef = useRef<HTMLOListElement>(null)
+  const chatScrollRef = useRef<HTMLDivElement>(null)
   const wasOpenRef = useRef(false)
   const previousFocusRef = useRef<HTMLElement | null>(null)
   const restoreFocusOnCloseRef = useRef(true)
@@ -324,10 +324,10 @@ export function TableTalk({
   }, [controlledDraft, onClearSendError, onDraftChange])
 
   const scrollToNewest = useCallback((behavior: ScrollBehavior = 'smooth') => {
-    const list = messageListRef.current
-    if (!list) return
+    const scrollRegion = chatScrollRef.current
+    if (!scrollRegion) return
     const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
-    list.scrollTo({ top: list.scrollHeight, behavior: reduceMotion ? 'auto' : behavior })
+    scrollRegion.scrollTo({ top: scrollRegion.scrollHeight, behavior: reduceMotion ? 'auto' : behavior })
     nearBottomRef.current = true
     setHasNewMessages(false)
     markMessagesRead()
@@ -426,10 +426,10 @@ export function TableTalk({
     selectTab(availableTabs[nextIndex], true)
   }
 
-  function handleMessageScroll() {
-    const list = messageListRef.current
-    if (!list) return
-    nearBottomRef.current = list.scrollHeight - list.scrollTop - list.clientHeight <= NEAR_BOTTOM_PX
+  function handleChatScroll() {
+    const scrollRegion = chatScrollRef.current
+    if (!scrollRegion) return
+    nearBottomRef.current = scrollRegion.scrollHeight - scrollRegion.scrollTop - scrollRegion.clientHeight <= NEAR_BOTTOM_PX
     if (nearBottomRef.current) {
       setHasNewMessages(false)
       markMessagesRead()
@@ -603,69 +603,77 @@ export function TableTalk({
           aria-labelledby={chatTabId}
           hidden={activeTab !== 'chat'}
         >
-          <div className="table-talk__message-region">
-            <ol
-              ref={messageListRef}
-              className="table-talk__messages"
-              role="log"
-              aria-label={labels.messageList}
-              aria-live="polite"
-              aria-relevant="additions text"
-              onScroll={handleMessageScroll}
-            >
-              {visibleMessages.length === 0 ? <li className="table-talk__empty">{labels.noMessages}</li> : null}
-              {visibleMessages.map((message) => {
-                const isOwn = message.playerId === myPlayerId
-                return (
-                  <li key={message.id} className="table-talk__message" data-own={isOwn || undefined}>
-                    <article>
-                      <header>
-                        <bdi dir="auto">{message.playerName}</bdi>
-                        <time dateTime={dateTimeValue(message.createdAt)}>{formatTime(message.createdAt)}</time>
-                      </header>
-                      <p dir="auto"><bdi>{message.text}</bdi></p>
-                    </article>
-                  </li>
-                )
-              })}
-            </ol>
-            {hasNewMessages ? (
-              <button className="table-talk__new-messages" type="button" style={TOUCH_TARGET} onClick={() => scrollToNewest()}>
-                {labels.newMessages}
-              </button>
-            ) : null}
-          </div>
-
-          {mutableParticipants.length > 0 ? (
-            <details className="table-talk__player-controls">
-              <summary style={TOUCH_TARGET}>
-                <VolumeOffIcon size={18} />
-                <span>{labels.playerControls}</span>
-                {mutedCount > 0 ? <span>{labels.mutedCount(mutedCount)}</span> : null}
-              </summary>
-              <ul>
-                {mutableParticipants.map((participant) => {
-                  const muted = mutedSet.has(participant.id)
-                  const actionLabel = muted ? labels.unmutePlayer(participant.name) : labels.mutePlayer(participant.name)
+          <div
+            ref={chatScrollRef}
+            className="table-talk__chat-scroll"
+            data-scroll-owner="chat"
+            role="region"
+            aria-label={labels.messageList}
+            tabIndex={0}
+            onScroll={handleChatScroll}
+          >
+            <div className="table-talk__message-region">
+              <ol
+                className="table-talk__messages"
+                role="log"
+                aria-label={labels.messageList}
+                aria-live="polite"
+                aria-relevant="additions text"
+              >
+                {visibleMessages.length === 0 ? <li className="table-talk__empty">{labels.noMessages}</li> : null}
+                {visibleMessages.map((message) => {
+                  const isOwn = message.playerId === myPlayerId
                   return (
-                    <li key={participant.id}>
-                      <bdi dir="auto">{participant.name}</bdi>
-                      <button
-                        type="button"
-                        style={TOUCH_TARGET}
-                        aria-label={actionLabel}
-                        aria-pressed={muted}
-                        onClick={() => onTogglePlayerMute(participant.id, !muted)}
-                      >
-                        {muted ? <VolumeIcon size={18} /> : <VolumeOffIcon size={18} />}
-                        {muted ? labels.unmute : labels.mute}
-                      </button>
+                    <li key={message.id} className="table-talk__message" data-own={isOwn || undefined}>
+                      <article>
+                        <header>
+                          <bdi dir="auto">{message.playerName}</bdi>
+                          <time dateTime={dateTimeValue(message.createdAt)}>{formatTime(message.createdAt)}</time>
+                        </header>
+                        <p dir="auto"><bdi>{message.text}</bdi></p>
+                      </article>
                     </li>
                   )
                 })}
-              </ul>
-            </details>
-          ) : null}
+              </ol>
+              {hasNewMessages ? (
+                <button className="table-talk__new-messages" type="button" style={TOUCH_TARGET} onClick={() => scrollToNewest()}>
+                  {labels.newMessages}
+                </button>
+              ) : null}
+            </div>
+
+            {mutableParticipants.length > 0 ? (
+              <details className="table-talk__player-controls">
+                <summary style={TOUCH_TARGET}>
+                  <VolumeOffIcon size={18} />
+                  <span>{labels.playerControls}</span>
+                  {mutedCount > 0 ? <span>{labels.mutedCount(mutedCount)}</span> : null}
+                </summary>
+                <ul>
+                  {mutableParticipants.map((participant) => {
+                    const muted = mutedSet.has(participant.id)
+                    const actionLabel = muted ? labels.unmutePlayer(participant.name) : labels.mutePlayer(participant.name)
+                    return (
+                      <li key={participant.id}>
+                        <bdi dir="auto">{participant.name}</bdi>
+                        <button
+                          type="button"
+                          style={TOUCH_TARGET}
+                          aria-label={actionLabel}
+                          aria-pressed={muted}
+                          onClick={() => onTogglePlayerMute(participant.id, !muted)}
+                        >
+                          {muted ? <VolumeIcon size={18} /> : <VolumeOffIcon size={18} />}
+                          {muted ? labels.unmute : labels.mute}
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </details>
+            ) : null}
+          </div>
 
           <form className="table-talk__composer" aria-busy={isSending || undefined} onSubmit={(event) => void submitMessage(event)}>
             <label htmlFor={inputId}>{labels.messageLabel}</label>

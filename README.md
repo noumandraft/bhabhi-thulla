@@ -89,6 +89,25 @@ Screenshots and `visual-qa-report.json` are written to `design/qa/`.
 
 Keep secrets in Render or local ignored `.env` files. Never expose `REDIS_URL` through a `VITE_` variable—every `VITE_` value is included in the public browser bundle.
 
+### Current production values
+
+The existing production stack is Hostinger at `thulla.joypad.fun`, the Render service at `bhabhi-thulla-server.onrender.com`, and an Upstash Redis database in Singapore. Configure the Render **web service** environment with these values:
+
+```env
+NODE_ENV=production
+NODE_VERSION=22
+CLIENT_ORIGIN=https://thulla.joypad.fun
+REDIS_URL=rediss://default:YOUR_UPSTASH_PASSWORD@YOUR_UPSTASH_ENDPOINT:6379
+REDIS_KEY_PREFIX=bhabhi-thulla:room:
+REDIS_DURABLE=true
+```
+
+Copy only the `rediss://...` URL from Upstash's **node-redis** connection example into `REDIS_URL`; do not paste the JavaScript example. Keep the URL in Render's secret environment-variable field and never commit it. Render supplies `PORT` and `RENDER_GIT_COMMIT`, so do not set either manually there.
+
+Upstash persists data to durable storage, so `REDIS_DURABLE=true` is correct for this deployment. The game still expires abandoned room keys after six hours by design. If the Redis provider is changed, reassess this flag instead of copying it blindly.
+
+Rotate any Upstash password whose full connection URL has ever been pasted into chat, an issue, a screenshot, a log, or any other non-secret location. After rotation, replace `REDIS_URL` in Render and redeploy once.
+
 ## Persistence modes
 
 Without `REDIS_URL`, the server deliberately uses in-memory room storage. That is convenient locally, but a restart deletes every active room and the process cannot safely scale to multiple instances.
@@ -103,7 +122,7 @@ Storage durability depends on the provider. Render's free Key Value service is i
 
 The included `render.yaml` defines the web service.
 
-1. Provision persistent Redis-compatible storage if resumable matches are required. Copy its private connection URL into `REDIS_URL`.
+1. Provision persistent Redis-compatible storage if resumable matches are required. Copy its secret TLS connection URL into `REDIS_URL`.
 2. Push the repository to GitHub.
 3. In Render, create a Blueprint from the repository, or create a Node web service manually.
 4. Build with `npm ci && npm run build:server`.
@@ -115,6 +134,17 @@ The included `render.yaml` defines the web service.
 10. Verify `https://YOUR-SERVICE.onrender.com/health` for process liveness and version information.
 11. Verify `https://YOUR-SERVICE.onrender.com/ready` reports the expected persistence mode and readiness before deploying the frontend.
 
+For the current service, the two checks are:
+
+```text
+https://bhabhi-thulla-server.onrender.com/health
+https://bhabhi-thulla-server.onrender.com/ready
+```
+
+With Upstash configured, `/ready` must return HTTP 200 and report `persistence.mode` as `redis`, `persistence.durable` as `true`, and `persistence.ready` as `true`. A 503 response, `mode: "memory"`, or `durable: false` means the frontend release should wait until the Render variables are corrected.
+
+The checked-in Blueprint deliberately defaults `REDIS_DURABLE` to `false` because it cannot know which Redis provider a new deployment will use. Render Blueprint syncs can reapply values from `render.yaml`; for the current Upstash-backed service, confirm `REDIS_DURABLE=true` after any Blueprint change or sync.
+
 Do not use `CLIENT_ORIGIN=*` in production. WebSocket traffic uses the same public port as HTTP.
 
 ## Deploy the frontend to Hostinger
@@ -124,9 +154,11 @@ Deploy the backend first so the new frontend never speaks to an older Socket.IO 
 Create `.env.production`:
 
 ```env
-VITE_SERVER_URL=https://YOUR-SERVICE.onrender.com
-VITE_APP_COMMIT=YOUR_GIT_COMMIT
+VITE_SERVER_URL=https://bhabhi-thulla-server.onrender.com
+VITE_APP_COMMIT=YOUR_CURRENT_GIT_COMMIT
 ```
+
+`VITE_APP_COMMIT` must be updated for every release. Obtain it with `git rev-parse --short=12 HEAD`; do not reuse the value from an older `.env.production` file.
 
 Then build:
 
@@ -136,7 +168,9 @@ npm run build:client
 npm run qa:platform
 ```
 
-Upload the **contents** of `dist/` to the document root assigned to `thulla.joypad.fun`. Include `sw.js`, `manifest.webmanifest`, `offline.html`, `platform.css`, `icons/` and `assets/`. Do not upload `node_modules`, `src`, Redis credentials or server files.
+Upload the **contents** of `dist/` to the document root assigned to `thulla.joypad.fun`. In the current Hostinger layout that is `public_html/thulla/`. `index.html` must be directly inside that directory—not inside an extra `dist/` or archive-name folder.
+
+Upload every generated item together, including `index.html`, `sw.js`, `manifest.webmanifest`, `offline.html`, `platform.css`, `robots.txt`, `sitemap.xml`, `social-preview.png`, `social-preview.svg`, `icons/` and `assets/`. Do not upload `node_modules`, `src`, `.env.production`, Redis credentials, tests or server files. If using a zip file in hPanel, extract it into `public_html/thulla/` and verify those top-level paths before deleting the zip.
 
 Hostinger must serve the site over HTTPS and serve `/sw.js` as JavaScript. The service worker uses network-first navigation and caches only the static shell/same-origin assets. A waiting release shows **Update & reconnect** and does not force a reload during a game.
 

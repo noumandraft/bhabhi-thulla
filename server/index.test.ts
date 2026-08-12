@@ -353,6 +353,14 @@ describe('Socket.IO server protocol', () => {
     sockets.push(await connectedSocket(url))
     const created = await emitAck<RoomCredentials>(sockets[0], 'room:create', { name: 'Fast Chatter' })
 
+    for (const invalid of [
+      { clientMessageId: 'not-a-uuid', text: 'Invalid id' },
+      { clientMessageId: randomUUID(), text: '   ' },
+      { clientMessageId: randomUUID(), text: 'one\ntwo\nthree\nfour' },
+    ]) {
+      expect((await emitAck(sockets[0], 'room:chat:send', invalid)).ok).toBe(false)
+    }
+
     let first: Ack<ChatMessage> | undefined
     for (let message = 0; message < 5; message += 1) {
       const response = await emitAck<ChatMessage>(sockets[0], 'room:chat:send', {
@@ -380,6 +388,75 @@ describe('Socket.IO server protocol', () => {
     expect(await emitAck(reconnected, 'room:chat:send', {
       clientMessageId: randomUUID(), text: 'Reconnect cannot bypass the seat limit',
     })).toMatchObject({ ok: false, error: expect.stringContaining('wait') })
+  })
+
+  it('replays messages missed while disconnected through history without duplicating live delivery', async () => {
+    gameServer = await createGameServer({
+      ...process.env,
+      NODE_ENV: 'test',
+      CLIENT_ORIGIN: 'http://localhost:5173',
+      REDIS_URL: '',
+    })
+    const port = await gameServer.listen(0)
+    const url = `http://127.0.0.1:${port}`
+    sockets.push(await connectedSocket(url), await connectedSocket(url))
+    const created = await emitAck<RoomCredentials>(sockets[0], 'room:create', { name: 'Returning Host' })
+    expect((await emitAck<RoomCredentials>(sockets[1], 'room:join', {
+      code: created.data!.code,
+      name: 'Connected Friend',
+    })).ok).toBe(true)
+
+    sockets[0].disconnect()
+    await vi.waitFor(() => expect(
+      gameServer!.manager.rooms.get(created.data!.code)?.players
+        .find((player) => player.id === created.data!.playerId)?.connected,
+    ).toBe(false))
+
+    const missed: ChatMessage[] = []
+    for (const text of ['First missed message', 'Second missed message']) {
+      const response = await emitAck<ChatMessage>(sockets[1], 'room:chat:send', {
+        clientMessageId: randomUUID(),
+        text,
+      })
+      expect(response.ok).toBe(true)
+      missed.push(response.data!)
+    }
+
+    const reconnected = await connectedSocket(url)
+    sockets.push(reconnected)
+    const liveMessages: ChatMessage[] = []
+    reconnected.on('room:chat:message', (message: ChatMessage) => liveMessages.push(message))
+    expect((await emitAck<RoomCredentials>(reconnected, 'room:reconnect', {
+      code: created.data!.code,
+      token: created.data!.token,
+    })).ok).toBe(true)
+    await new Promise((fulfill) => setTimeout(fulfill, 20))
+    expect(liveMessages).toEqual([])
+
+    const history = await emitAck<ChatHistory>(reconnected, 'room:chat:history', {})
+    expect(history).toEqual({
+      ok: true,
+      data: {
+        epoch: missed[0].epoch,
+        messages: missed,
+      },
+    })
+    expect(missed.map((message) => message.sequence)).toEqual([1, 2])
+
+    const nextClientMessageId = randomUUID()
+    const next = await emitAck<ChatMessage>(sockets[1], 'room:chat:send', {
+      clientMessageId: nextClientMessageId,
+      text: 'Live after reconnect',
+    })
+    expect(next.ok).toBe(true)
+    await vi.waitFor(() => expect(liveMessages).toEqual([next.data]))
+
+    expect(await emitAck<ChatMessage>(sockets[1], 'room:chat:send', {
+      clientMessageId: nextClientMessageId,
+      text: 'Live after reconnect',
+    })).toEqual(next)
+    await new Promise((fulfill) => setTimeout(fulfill, 20))
+    expect(liveMessages).toEqual([next.data])
   })
 
   it('keeps reaction limits on the seat and excludes a superseded socket from broadcasts', async () => {

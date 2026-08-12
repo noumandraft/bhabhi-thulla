@@ -64,6 +64,32 @@ describe('Pakistani Bhabhi rules', () => {
     expect(room.game?.currentTurnId).toBe(rightPlayer.id)
   })
 
+  it('keeps moving right while skipping escaped seats and a late spectator', () => {
+    const { manager, room } = setupGame(4)
+    const leader = room.players[0]
+    const escapedRight = room.players[3]
+    const expectedNext = room.players[2]
+    escapedRight.hand = []
+    escapedRight.escaped = true
+    room.game!.roundEscapeOrder.push(escapedRight.id)
+    const late = manager.joinRoom(room.code, 'Late Friend', 'socket-late').room.players.at(-1)!
+    expect(late.waitingForNextRound).toBe(true)
+
+    Object.assign(room.game!, {
+      phase: 'turn', firstTrick: false, trick: [], leadSuit: null,
+      currentTurnId: leader.id, resolvedTrick: null, resolutionEndsAt: null,
+    })
+    leader.hand = [
+      { id: 'hearts-2', suit: 'hearts', rank: '2' },
+      { id: 'clubs-A', suit: 'clubs', rank: 'A' },
+    ]
+    manager.playCard(room.code, leader.id, 'hearts-2')
+
+    expect(room.game?.currentTurnId).toBe(expectedNext.id)
+    expect(room.game?.currentTurnId).not.toBe(escapedRight.id)
+    expect(room.game?.currentTurnId).not.toBe(late.id)
+  })
+
   it('only allows cards of the led suit when the player can follow', () => {
     const { manager, room } = setupGame(3)
     const game = room.game!
@@ -80,6 +106,18 @@ describe('Pakistani Bhabhi rules', () => {
       { id: 'spades-K', suit: 'spades', rank: 'K' },
     ]
     expect(manager.legalCards(room, follower.id).map((card) => card.id)).toEqual(['hearts-5'])
+    expect(() => manager.playCard(room.code, follower.id, 'spades-K')).toThrow('follow the led suit')
+    expect(follower.hand.map((card) => card.id)).toEqual(['hearts-5', 'spades-K'])
+    expect(game.trick.map((entry) => entry.card.id)).toEqual(['hearts-2'])
+    expect(game.currentTurnId).toBe(follower.id)
+
+    follower.hand = [
+      { id: 'spades-K', suit: 'spades', rank: 'K' },
+      { id: 'diamonds-4', suit: 'diamonds', rank: '4' },
+    ]
+    expect(manager.legalCards(room, follower.id).map((card) => card.id)).toEqual(['spades-K', 'diamonds-4'])
+    manager.playCard(room.code, follower.id, 'spades-K')
+    expect(game).toMatchObject({ phase: 'resolving', resolvedTrick: { kind: 'thulla', lastPlayerId: follower.id } })
   })
 
   it('shows a THULLA for exactly three seconds with no active turn, then starts a fresh timer', async () => {
@@ -156,6 +194,124 @@ describe('Pakistani Bhabhi rules', () => {
     await vi.advanceTimersByTimeAsync(TRICK_RESOLUTION_MS)
     expect(room.game?.resolvedTrick).toBeNull()
     expect(room.game?.trick).toEqual([{ playerId: leader.id, card: { id: 'clubs-9', suit: 'clubs', rank: '9' } }])
+    expect(room.game?.currentTurnId).toBe(follower.id)
+  })
+
+  it('records simultaneous escapes in the anticlockwise order their final cards were played', async () => {
+    const { manager, room } = setupGame(4)
+    const [leader, lastPlayer, secondFollower, firstFollower] = room.players
+    Object.assign(room.game!, {
+      phase: 'turn', firstTrick: false, trick: [], leadSuit: null, currentTurnId: leader.id,
+      resolvedTrick: null, resolutionEndsAt: null, roundEscapeOrder: [],
+    })
+    leader.hand = [
+      { id: 'hearts-A', suit: 'hearts', rank: 'A' },
+      { id: 'spades-2', suit: 'spades', rank: '2' },
+    ]
+    firstFollower.hand = [{ id: 'hearts-K', suit: 'hearts', rank: 'K' }]
+    secondFollower.hand = [{ id: 'hearts-Q', suit: 'hearts', rank: 'Q' }]
+    lastPlayer.hand = [{ id: 'hearts-J', suit: 'hearts', rank: 'J' }]
+
+    manager.playCard(room.code, leader.id, 'hearts-A')
+    manager.playCard(room.code, firstFollower.id, 'hearts-K')
+    manager.playCard(room.code, secondFollower.id, 'hearts-Q')
+    manager.playCard(room.code, lastPlayer.id, 'hearts-J')
+
+    expect(room.game).toMatchObject({ phase: 'resolving', pendingLoserId: leader.id })
+    expect(room.game?.roundEscapeOrder).toEqual([firstFollower.id, secondFollower.id, lastPlayer.id])
+
+    await vi.advanceTimersByTimeAsync(TRICK_RESOLUTION_MS)
+    expect(room).toMatchObject({ status: 'finished', game: { loserId: leader.id } })
+    expect(room.session.scores.find((score) => score.playerId === firstFollower.id)?.firstEscapes).toBe(1)
+    expect(room.session.scores.find((score) => score.playerId === secondFollower.id)?.firstEscapes).toBe(0)
+    expect(room.session.scores.find((score) => score.playerId === lastPlayer.id)?.firstEscapes).toBe(0)
+  })
+
+  it('keeps THULLA escape order tied to the order final cards reached the table', () => {
+    const { manager, room } = setupGame(5)
+    const [leader, untouched, cutter, secondFollower, winner] = room.players
+    Object.assign(room.game!, {
+      phase: 'turn', firstTrick: false, trick: [], leadSuit: null, currentTurnId: leader.id,
+      resolvedTrick: null, resolutionEndsAt: null, roundEscapeOrder: [],
+    })
+    leader.hand = [{ id: 'hearts-10', suit: 'hearts', rank: '10' }]
+    winner.hand = [{ id: 'hearts-A', suit: 'hearts', rank: 'A' }]
+    secondFollower.hand = [{ id: 'hearts-K', suit: 'hearts', rank: 'K' }]
+    cutter.hand = [{ id: 'diamonds-2', suit: 'diamonds', rank: '2' }]
+    untouched.hand = [{ id: 'clubs-2', suit: 'clubs', rank: '2' }]
+
+    manager.playCard(room.code, leader.id, 'hearts-10')
+    manager.playCard(room.code, winner.id, 'hearts-A')
+    manager.playCard(room.code, secondFollower.id, 'hearts-K')
+    manager.playCard(room.code, cutter.id, 'diamonds-2')
+
+    expect(room.game).toMatchObject({
+      phase: 'resolving',
+      resolvedTrick: { kind: 'thulla', winnerId: winner.id, lastPlayerId: cutter.id },
+    })
+    expect(room.game?.roundEscapeOrder).toEqual([leader.id, secondFollower.id, cutter.id])
+    expect([leader, secondFollower, cutter].every((player) => player.escaped)).toBe(true)
+    expect(winner.escaped).toBe(false)
+    expect(untouched.escaped).toBe(false)
+  })
+
+  it('assigns consecutive THULLAs to the highest led-card player and preserves their right-hand option', async () => {
+    const { manager, room } = setupGame(4)
+    const [leader, untouched, cutter, follower] = room.players
+    Object.assign(room.game!, {
+      phase: 'turn', firstTrick: false, trick: [], leadSuit: null, currentTurnId: leader.id,
+      resolvedTrick: null, resolutionEndsAt: null, turnEndsAt: Date.now() + 35_000,
+      takeUsedForLead: false,
+    })
+    leader.hand = [
+      { id: 'hearts-10', suit: 'hearts', rank: '10' },
+      { id: 'spades-2', suit: 'spades', rank: '2' },
+    ]
+    follower.hand = [
+      { id: 'hearts-A', suit: 'hearts', rank: 'A' },
+      { id: 'clubs-K', suit: 'clubs', rank: 'K' },
+      { id: 'clubs-Q', suit: 'clubs', rank: 'Q' },
+    ]
+    cutter.hand = [
+      { id: 'diamonds-2', suit: 'diamonds', rank: '2' },
+      { id: 'diamonds-3', suit: 'diamonds', rank: '3' },
+      { id: 'spades-3', suit: 'spades', rank: '3' },
+    ]
+    untouched.hand = [{ id: 'hearts-2', suit: 'hearts', rank: '2' }]
+    const wasteBefore = room.game!.waste.length
+
+    manager.playCard(room.code, leader.id, 'hearts-10')
+    manager.playCard(room.code, follower.id, 'hearts-A')
+    manager.playCard(room.code, cutter.id, 'diamonds-2')
+
+    expect(room.game).toMatchObject({
+      phase: 'resolving', pendingTurnId: follower.id,
+      resolvedTrick: { kind: 'thulla', winnerId: follower.id, lastPlayerId: cutter.id },
+    })
+    expect(follower.hand.map((card) => card.id)).toEqual(expect.arrayContaining([
+      'clubs-K', 'clubs-Q', 'hearts-10', 'hearts-A', 'diamonds-2',
+    ]))
+    expect(room.game!.waste).toHaveLength(wasteBefore)
+
+    await vi.advanceTimersByTimeAsync(TRICK_RESOLUTION_MS)
+    expect(room.game).toMatchObject({ phase: 'turn', currentTurnId: follower.id, resolvedTrick: null })
+    manager.playCard(room.code, follower.id, 'clubs-K')
+    manager.playCard(room.code, cutter.id, 'diamonds-3')
+
+    expect(room.game).toMatchObject({
+      phase: 'resolving', pendingTurnId: follower.id,
+      resolvedTrick: { kind: 'thulla', winnerId: follower.id, lastPlayerId: cutter.id },
+    })
+    expect(room.game!.activity.filter((item) => item.kind === 'thulla')).toHaveLength(2)
+    expect(room.game!.waste).toHaveLength(wasteBefore)
+
+    await vi.advanceTimersByTimeAsync(TRICK_RESOLUTION_MS)
+    expect(manager.view(room, follower.id).game).toMatchObject({
+      currentTurnId: follower.id, canTakeRightHand: true, takeTargetId: cutter.id,
+    })
+    manager.takeRightHand(room.code, follower.id)
+    expect(cutter).toMatchObject({ hand: [], escaped: true })
+    expect(follower.hand.some((card) => card.id === 'spades-3')).toBe(true)
     expect(room.game?.currentTurnId).toBe(follower.id)
   })
 
@@ -395,18 +551,72 @@ describe('lobby, bots, reconnection and sessions', () => {
     manager.playCard(room.code, follower.id, 'hearts-K')
     expect(room.status).toBe('playing')
     expect(room.game).toMatchObject({ phase: 'resolving', pendingLoserId: leader.id, currentTurnId: null })
+    expect(room.game?.roundEscapeOrder).toEqual([third.id, follower.id])
+    expect(manager.view(room, leader.id).game?.resolvedTrick).toMatchObject({
+      kind: 'clean', winnerId: leader.id, lastPlayerId: follower.id,
+      cards: [
+        { playerId: leader.id, card: { id: 'hearts-A', suit: 'hearts', rank: 'A' } },
+        { playerId: follower.id, card: { id: 'hearts-K', suit: 'hearts', rank: 'K' } },
+      ],
+    })
 
-    await vi.advanceTimersByTimeAsync(TRICK_RESOLUTION_MS)
+    await vi.advanceTimersByTimeAsync(TRICK_RESOLUTION_MS - 1)
+    expect(room).toMatchObject({ status: 'playing', game: { phase: 'resolving', pendingLoserId: leader.id } })
+    expect(manager.view(room, follower.id).game?.resolvedTrick?.cards.at(-1)).toMatchObject({
+      playerId: follower.id, card: { id: 'hearts-K' },
+    })
+    await vi.advanceTimersByTimeAsync(1)
     expect(room).toMatchObject({ status: 'finished', game: { loserId: leader.id, resolvedTrick: null } })
     expect(room.session.scores.find((score) => score.playerId === leader.id)).toMatchObject({
       roundsPlayed: 1, bhabhiCount: 1, currentBhabhiStreak: 1,
     })
     expect(room.session.scores.find((score) => score.playerId === third.id)?.firstEscapes).toBe(1)
 
+    manager.setRematchReady(room.code, credentials[0].playerId, true)
+    expect(manager.view(room, credentials[0].playerId)).toMatchObject({
+      canStart: false,
+      startBlockReason: expect.stringContaining(follower.name),
+    })
+    manager.setRematchReady(room.code, credentials[0].playerId, false)
+    expect(manager.view(room, credentials[0].playerId).canStart).toBe(false)
     for (const credential of credentials) manager.setRematchReady(room.code, credential.playerId, true)
     expect(manager.view(room, credentials[0].playerId).canStart).toBe(true)
     manager.startGame(room.code, credentials[0].playerId)
     expect(room).toMatchObject({ status: 'playing', session: { roundNumber: 2 } })
+  })
+
+  it('allows only the host to reset completed session scores and never resets an active round', () => {
+    const { manager, room, credentials } = setupGame(3)
+    expect(() => manager.resetSession(room.code, credentials[0].playerId)).toThrow('during a match')
+
+    room.status = 'finished'
+    room.session.roundNumber = 4
+    room.players.forEach((player, index) => { player.joinedInRound = index + 2 })
+    room.session.scores.forEach((score, index) => {
+      Object.assign(score, {
+        roundsPlayed: 4,
+        escapes: index === 0 ? 2 : 3,
+        firstEscapes: index,
+        bhabhiCount: index === 0 ? 2 : 1,
+        currentBhabhiStreak: index === 0 ? 2 : 0,
+        bestBhabhiStreak: 2,
+      })
+    })
+
+    expect(() => manager.resetSession(room.code, credentials[1].playerId)).toThrow('host')
+    manager.resetSession(room.code, credentials[0].playerId)
+
+    expect(room.session.roundNumber).toBe(0)
+    expect(room.players.every((player) => player.joinedInRound === 1)).toBe(true)
+    expect(room.session.scores).toHaveLength(room.players.length)
+    expect(room.session.scores.every((score) => (
+      score.roundsPlayed === 0
+      && score.escapes === 0
+      && score.firstEscapes === 0
+      && score.bhabhiCount === 0
+      && score.currentBhabhiStreak === 0
+      && score.bestBhabhiStreak === 0
+    ))).toBe(true)
   })
 
   it('queues a late joiner without changing the active hand or anticlockwise order', () => {

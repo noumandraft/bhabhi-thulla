@@ -234,6 +234,15 @@ function Landing({ socket, connected, inviteCode, t, language, onLanguage, onEnt
           <div className="hero-kicker"><span className="live-dot"/> {t('privateRooms')}</div>
           <h1>{t('heroLineOne')}<br/><em>{t('heroLineTwo').split(' ')[0]}</em> {t('heroLineTwo').split(' ').slice(1).join(' ')}</h1>
           <p>{t('heroDescription')}</p>
+          <button
+            className="button button--primary landing-play-cta"
+            data-action="focus-create-room"
+            type="button"
+            aria-controls="play-bhabhi-thulla"
+            onClick={focusCreateRoom}
+          >
+            <Play size={19} fill="currentColor"/> {t('startPrivate')}
+          </button>
         </div>
         <div className="hero-copy__visuals">
           <div className="hero-cards" aria-hidden="true"><div className="hero-card hero-card--one"><span>A</span><i>♠</i></div><div className="hero-card hero-card--two"><span>K</span><i>♥</i></div><div className="hero-card hero-card--three"><span>7</span><i>♦</i></div></div>
@@ -280,7 +289,7 @@ function PlayerSeat({ player, host, busy, t, onKick, onRemoveBot }: { player: Cl
   </div>
 }
 
-function Lobby({ room, socket, t, language, chatSupported, onLanguage, onOpenRules, onLeave, onToast }: { room: ClientRoomView; socket: Socket; t: TFunction; language: Language; chatSupported: boolean; onLanguage: (language: Language) => void; onOpenRules: () => void; onLeave: () => void; onToast: ShowToast }) {
+function Lobby({ room, socket, t, language, chatSupported, tableTalkControl, onLanguage, onOpenRules, onLeave, onToast }: { room: ClientRoomView; socket: Socket; t: TFunction; language: Language; chatSupported: boolean; tableTalkControl?: ReactNode; onLanguage: (language: Language) => void; onOpenRules: () => void; onLeave: () => void; onToast: ShowToast }) {
   const [busy, setBusy] = useState(false)
   const me = room.players.find((player) => player.isYou)!
   const settings = roomSettings(room)
@@ -307,11 +316,21 @@ function Lobby({ room, socket, t, language, chatSupported, onLanguage, onOpenRul
   const allReady = participants.length >= room.minPlayers && participants.every((player) => player.isBot || player.ready)
 
   return <main className="lobby-shell">
-    <header className="app-header"><Logo compact/><div className="header-actions"><LanguageSelect language={language} onChange={onLanguage} t={t}/><div className="header-actions__secondary"><IconButton label={t('howToPlay')} onClick={onOpenRules}><BookOpen size={20}/></IconButton><IconButton label={t('leaveTable')} onClick={onLeave}><LogOut size={20}/></IconButton></div><HeaderOverflow t={t} onOpenRules={onOpenRules} onLeave={onLeave}/></div></header>
+    <header className="app-header"><Logo compact/><div className="header-actions"><LanguageSelect language={language} onChange={onLanguage} t={t}/>{tableTalkControl ? <div className="app-header__table-talk">{tableTalkControl}</div> : null}<div className="header-actions__secondary"><IconButton label={t('howToPlay')} onClick={onOpenRules}><BookOpen size={20}/></IconButton><IconButton label={t('leaveTable')} onClick={onLeave}><LogOut size={20}/></IconButton></div><HeaderOverflow t={t} onOpenRules={onOpenRules} onLeave={onLeave}/></div></header>
     <section className="lobby-card lobby-card--expanded">
       <div className="lobby-card__intro"><span className="eyebrow">{t('pullUpChair')}</span><h1>{t('waitingGang')}</h1><p>{t('lobbyDescription')}</p></div>
       <button className="room-code" type="button" onClick={() => void copyInvite()} aria-label={t('copyInviteRoom', { code: room.code })}><span>{t('roomCode')}</span><b dir="ltr">{room.code}</b><Copy size={19}/></button>
       <div className="seat-progress" role="progressbar" aria-label={t('seatsFilled', { count: connectedCount, total: room.maxPlayers })} aria-valuemin={0} aria-valuemax={room.maxPlayers} aria-valuenow={connectedCount} aria-valuetext={t('seatsFilled', { count: connectedCount, total: room.maxPlayers })}>{Array.from({ length: room.maxPlayers }, (_, index) => <i key={index} className={index < connectedCount ? 'is-filled' : ''}/>)}</div>
+      <p className="lobby-hint"><Users size={17}/>{connectedCount < 3 ? t('needPlayers', { count: 3 - connectedCount }) : allReady ? t('readyToDeal') : t('needReady')}</p>
+      <div className="lobby-actions">
+        <div className="lobby-actions__primary" data-action-group="primary">
+          {me.isHost ? <button className="button button--primary lobby-actions__deal" type="button" disabled={!room.canStart || !allReady || busy} onClick={() => void act('game:start', {}, t('startFailed'))}><Play size={19} fill="currentColor"/> {busy ? t('shuffling') : t('dealCards')}</button> : <p className="host-wait">{t('waitingHost')}</p>}
+        </div>
+        <div className="lobby-actions__secondary" data-action-group="secondary">
+          <button className="button button--secondary lobby-actions__copy" type="button" onClick={() => void copyInvite()}><Share2 size={19}/> {t('copyInvite')}</button>
+          <button className="button button--secondary lobby-actions__readiness" type="button" disabled={busy} aria-pressed={me.ready} onClick={() => void act('room:ready', { ready: !me.ready }, t('readyUpdateFailed'))}><Check size={19}/> {me.ready ? t('cancelReadiness') : t('playerReady')}</button>
+        </div>
+      </div>
       <div className="lobby-content-grid">
         <div>
           <div className="lobby-players">{room.players.map((player) => <PlayerSeat key={player.id} player={player} host={me.isHost} busy={busy} t={t} onKick={(playerId) => void act('room:kick', { playerId }, t('removePlayerFailed'))} onRemoveBot={(playerId) => void act('room:remove-bot', { playerId }, t('removeBotFailed'))}/>)}{Array.from({ length: Math.max(0, 3 - room.players.length) }, (_, index) => <div className="empty-seat" key={index}><span>+</span><p>{t('waitingPlayer')}</p></div>)}</div>
@@ -326,8 +345,6 @@ function Lobby({ room, socket, t, language, chatSupported, onLanguage, onOpenRul
         </fieldset>
       </div>
       {scores.length ? <div className="lobby-score-preview"><b>{t('sessionScore')}</b><span>{t('round', { count: room.session?.roundNumber ?? 1 })}</span>{scores.slice(0, 3).map((score) => <p key={score.playerId}><span><bdi dir="auto">{score.playerName}</bdi></span><b>{score.escapes} {t('gotAway')} · {score.bhabhiCount} {t('bhabhi')}</b></p>)}</div> : null}
-      <div className="lobby-actions"><button className="button button--secondary" type="button" onClick={() => void copyInvite()}><Share2 size={19}/> {t('copyInvite')}</button><button className={`button ${me.ready ? 'button--secondary' : 'button--primary'}`} type="button" disabled={busy} onClick={() => void act('room:ready', { ready: !me.ready }, t('readyUpdateFailed'))}><Check size={19}/> {me.ready ? t('cancelReadiness') : t('playerReady')}</button>{me.isHost ? <button className="button button--primary" type="button" disabled={!room.canStart || !allReady || busy} onClick={() => void act('game:start', {}, t('startFailed'))}><Play size={19} fill="currentColor"/> {busy ? t('shuffling') : t('dealCards')}</button> : <p className="host-wait">{t('waitingHost')}</p>}</div>
-      <p className="lobby-hint"><Users size={17}/>{connectedCount < 3 ? t('needPlayers', { count: 3 - connectedCount }) : allReady ? t('readyToDeal') : t('needReady')}</p>
     </section>
   </main>
 }
@@ -687,39 +704,41 @@ export default function App() {
     if (!response.ok) throw new Error(response.error ?? 'Reaction send failed')
   }
 
+  const tableTalkControl = displayedRoom && tableTalkAvailable && (quickTalkEnabled || textTalkEnabled) ? <TableTalk
+    className={`table-talk--${displayedRoom.status === 'lobby' ? 'lobby table-talk--in-header' : 'game'}`}
+    open={tableTalkOpen}
+    unreadCount={unreadChatCount}
+    messages={chatMessages}
+    participants={tableTalkParticipants}
+    myPlayerId={displayedRoom.yourPlayerId}
+    quickReactions={tableTalkReactions}
+    mutedPlayerIds={mutedChatPlayerIds}
+    isMyTurn={isMyTurn}
+    quickEnabled={quickTalkEnabled}
+    chatEnabled={textTalkEnabled}
+    sendDisabled={!connected || Boolean(qaRoom)}
+    initialTab={textTalkEnabled ? 'chat' : 'quick'}
+    labels={tableTalkLabels}
+    formatTime={formatChatTime}
+    draft={chatDraft}
+    sendError={!qaRoom && !connected ? t('offlineChat') : chatSendError || null}
+    onOpen={openTableTalk}
+    onClose={() => setTableTalkOpen(false)}
+    onReturnToCards={() => window.requestAnimationFrame(() => document.getElementById('game-v2-hand')?.focus())}
+    onDraftChange={changeChatDraft}
+    onClearSendError={() => setChatSendError('')}
+    onSendMessage={sendChatMessage}
+    onSendQuickReaction={sendTableReaction}
+    onTogglePlayerMute={toggleChatPlayerMute}
+    onMessagesRead={(sequence) => setLastReadChatSequence((current) => Math.max(current, sequence))}
+  /> : null
+
   if (reconnecting && !displayedRoom) return <main className="loading-screen"><Logo/><span className="spinner spinner--large"/><div className="loading-screen__copy"><p>{t('findingSeat')}</p>{restoreElapsed >= 8 ? <small>{t('findingSeatElapsed', { count: restoreElapsed })}</small> : null}</div>{restoreElapsed >= 12 ? <div className="loading-screen__actions"><button className="button button--primary" type="button" onClick={() => { socket.disconnect(); socket.connect(); setRestoreElapsed(0) }}>{t('retryConnection')}</button><button className="button button--secondary" type="button" onClick={() => clearSeat(credentials?.code, t('seatRestoreAbandoned'))}>{t('forgetSavedSeat')}</button></div> : null}</main>
 
   return <>
-    {!displayedRoom ? <><Landing socket={socket} connected={connected} inviteCode={inviteCode} t={t} language={language} onLanguage={setLanguage} onEntered={entered} onOpenRules={openRules} onOpenTutorial={openTutorial} onToast={showToast}/>{entryError ? <div className="entry-banner" role="alert">{entryError}</div> : null}</> : displayedRoom.status === 'lobby' ? <Lobby room={displayedRoom} socket={socket} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/> : <GameTable room={displayedRoom} socket={socket} connected={connected} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} preferences={preferences} onPreference={updatePreference} liveReaction={visibleReaction} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/>}
+    {!displayedRoom ? <><Landing socket={socket} connected={connected} inviteCode={inviteCode} t={t} language={language} onLanguage={setLanguage} onEntered={entered} onOpenRules={openRules} onOpenTutorial={openTutorial} onToast={showToast}/>{entryError ? <div className="entry-banner" role="alert">{entryError}</div> : null}</> : displayedRoom.status === 'lobby' ? <Lobby room={displayedRoom} socket={socket} t={t} language={language} chatSupported={chatSupported} tableTalkControl={tableTalkControl} onLanguage={setLanguage} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/> : <GameTable room={displayedRoom} socket={socket} connected={connected} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} preferences={preferences} onPreference={updatePreference} liveReaction={visibleReaction} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/>}
     {displayedRoom?.status === 'lobby' && visibleReaction && !preferences.reactionsMuted ? <div className={`table-talk__lobby-reaction ${tableTalkOpen ? 'is-drawer-open' : ''}`} role="status" aria-live="polite"><b><bdi dir="auto">{visibleReaction.playerId === displayedRoom.yourPlayerId ? t('you') : visibleReaction.playerName}</bdi></b><span>{reactionLabel(visibleReaction.reaction, t)}</span></div> : null}
-    {displayedRoom && tableTalkAvailable ? <TableTalk
-      className={`table-talk--${displayedRoom.status === 'lobby' ? 'lobby' : 'game'}`}
-      open={tableTalkOpen}
-      unreadCount={unreadChatCount}
-      messages={chatMessages}
-      participants={tableTalkParticipants}
-      myPlayerId={displayedRoom.yourPlayerId}
-      quickReactions={tableTalkReactions}
-      mutedPlayerIds={mutedChatPlayerIds}
-      isMyTurn={isMyTurn}
-      quickEnabled={quickTalkEnabled}
-      chatEnabled={textTalkEnabled}
-      sendDisabled={!connected || Boolean(qaRoom)}
-      initialTab={textTalkEnabled ? 'chat' : 'quick'}
-      labels={tableTalkLabels}
-      formatTime={formatChatTime}
-      draft={chatDraft}
-      sendError={!qaRoom && !connected ? t('offlineChat') : chatSendError || null}
-      onOpen={openTableTalk}
-      onClose={() => setTableTalkOpen(false)}
-      onReturnToCards={() => window.requestAnimationFrame(() => document.getElementById('game-v2-hand')?.focus())}
-      onDraftChange={changeChatDraft}
-      onClearSendError={() => setChatSendError('')}
-      onSendMessage={sendChatMessage}
-      onSendQuickReaction={sendTableReaction}
-      onTogglePlayerMute={toggleChatPlayerMute}
-      onMessagesRead={(sequence) => setLastReadChatSequence((current) => Math.max(current, sequence))}
-    /> : null}
+    {displayedRoom?.status !== 'lobby' ? tableTalkControl : null}
     {!auxiliaryOverlaysBlocked && rulesOpen ? <RulesModal t={t} onClose={() => setRulesOpen(false)}/> : null}
     {!auxiliaryOverlaysBlocked && tutorialOpen ? <Tutorial t={t} onClose={() => setTutorialOpen(false)} onComplete={() => updatePreference('tutorialComplete', true)}/> : null}
     {toast ? <div className={`toast toast--${toast.tone}`} data-tone={toast.tone} role={toast.tone === 'error' ? 'alert' : 'status'} aria-live={toast.tone === 'error' ? 'assertive' : 'polite'}>{toast.tone === 'success' ? <Check size={18}/> : toast.tone === 'error' ? <CircleAlert size={18}/> : <Info size={18}/>} {toast.message}</div> : null}

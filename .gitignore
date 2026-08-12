@@ -9,3 +9,7 @@ dist-server/
 .DS_Store
 thulla-frontend.zip
 thulla-frontend/
+/bhabhi-thulla-hostinger-*/
+/bhabhi-thulla-hostinger-*.zip
+/design/qa/*.png
+/design/qa/visual-qa-report.json

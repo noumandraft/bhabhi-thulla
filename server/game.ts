@@ -987,7 +987,7 @@ export class GameManager {
     const winner = this.requirePlayer(room, winnerEntry.playerId)
     winner.hand = sortCards([...winner.hand, ...completed.map((entry) => entry.card)])
     addActivity(game, `${thullaPlayer.name} played a THULLA! ${winner.name} picked up ${completed.length} cards.`, 'warning', 'thulla', { thullaPlayerId: thullaPlayer.id, winnerId: winner.id, cardCount: completed.length })
-    this.escapeEmptyPlayers(room, winner.id)
+    this.escapeEmptyPlayers(room, winner.id, completed.map((entry) => entry.playerId))
     this.beginResolution(room, {
       cards: completed,
       kind: 'thulla',
@@ -1001,7 +1001,7 @@ export class GameManager {
     const completed = [...game.trick]
     const winnerEntry = highestLedCard(completed, game.leadSuit!)
     const winner = this.requirePlayer(room, winnerEntry.playerId)
-    this.escapeEmptyPlayers(room, winner.id)
+    this.escapeEmptyPlayers(room, winner.id, completed.map((entry) => entry.playerId))
     const loserId = this.onlyRemainingPlayerId(room)
     const needsWasteLead = !loserId && winner.hand.length === 0
     if (needsWasteLead) {
@@ -1080,8 +1080,15 @@ export class GameManager {
     game.waste.push(...pendingWasteCards)
   }
 
-  private escapeEmptyPlayers(room: Room, exceptPlayerId: string): void {
-    for (const player of room.players) {
+  private escapeEmptyPlayers(room: Room, exceptPlayerId: string, trickOrder: string[] = []): void {
+    const orderedIds = [...new Set(trickOrder)]
+    const orderedPlayers = [
+      ...orderedIds
+        .map((playerId) => room.players.find((player) => player.id === playerId))
+        .filter((player): player is Player => Boolean(player)),
+      ...room.players.filter((player) => !orderedIds.includes(player.id)),
+    ]
+    for (const player of orderedPlayers) {
       if (!player.waitingForNextRound && !player.escaped && player.id !== exceptPlayerId && player.hand.length === 0) this.markEscaped(room, player)
     }
   }

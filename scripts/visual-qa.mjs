@@ -23,6 +23,13 @@ const SHORT_PHONE_VIEWPORTS = [
   { name: 'landscape-667x375', width: 667, height: 375 },
   { name: 'landscape-740x360', width: 740, height: 360 },
 ]
+const LANDING_PLAY_CTA_VIEWPORTS = new Set([
+  'phone-320x480',
+  'phone-320x568',
+  'phone-375x512',
+  'landscape-667x375',
+  'landscape-740x360',
+])
 const LANDING_SEO_VIEWPORTS = [
   { name: 'seo-phone-320', width: 320, height: 568 },
   { name: 'seo-phone-375', width: 375, height: 812 },
@@ -144,11 +151,19 @@ async function evaluate(cdp, expression) {
 }
 
 async function waitForExpression(cdp, expression, attempts = 300) {
+  let lastError = null
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (await evaluate(cdp, expression)) return
+    try {
+      if (await evaluate(cdp, expression)) return
+      lastError = null
+    } catch (error) {
+      // A navigation can briefly replace the document between CDP polls.
+      // Treat that transient execution-context gap like a false predicate.
+      lastError = error
+    }
     await delay(100)
   }
-  throw new Error(`Timed out waiting for: ${expression}`)
+  throw new Error(`Timed out waiting for: ${expression}${lastError ? ` Last evaluation error: ${lastError.message}` : ''}`)
 }
 
 async function setViewport(cdp, width, height) {
@@ -226,6 +241,10 @@ const diagnosticsExpression = `(() => {
   const lobbyActionsRect = lobbyActions?.getBoundingClientRect()
   const lobbyCardRect = document.querySelector('.lobby-card--expanded')?.getBoundingClientRect()
   const primaryJoinActionRect = document.querySelector('.join-card button[type="submit"]')?.getBoundingClientRect()
+  const landingPlayCta = document.querySelector('.landing-play-cta[data-action="focus-create-room"]')
+  const landingPlayCtaRect = landingPlayCta?.getBoundingClientRect()
+  const landingPlayTargetId = landingPlayCta?.getAttribute('aria-controls') ?? ''
+  const landingPlayTarget = landingPlayTargetId ? document.getElementById(landingPlayTargetId) : null
   const landingCardRects = [...document.querySelectorAll('.hero-card')]
     .filter(rendered)
     .map((element) => element.getBoundingClientRect())
@@ -253,6 +272,12 @@ const diagnosticsExpression = `(() => {
   const tableTalkComposerRect = tableTalkComposer?.getBoundingClientRect()
   const tableTalkTextareaRect = tableTalkDrawer?.querySelector('textarea')?.getBoundingClientRect()
   const tableTalkSendRect = tableTalkDrawer?.querySelector('.table-talk__send')?.getBoundingClientRect()
+  const tableTalkChatScroll = tableTalkDrawer?.querySelector('.table-talk__chat-scroll[data-scroll-owner="chat"]')
+  const tableTalkChatScrollRect = tableTalkChatScroll?.getBoundingClientRect()
+  const tableTalkPlayerControls = tableTalkChatScroll?.querySelector('.table-talk__player-controls')
+  const tableTalkPlayerControlsRect = tableTalkPlayerControls?.getBoundingClientRect()
+  const tableTalkPlayerControlsSummary = tableTalkPlayerControls?.querySelector('summary')
+  const tableTalkPlayerControlsSummaryRect = tableTalkPlayerControlsSummary?.getBoundingClientRect()
   const platformNotice = document.querySelector('.platform-notice')
   const platformNoticeRect = platformNotice?.getBoundingClientRect()
   const tableTalkTrigger = document.querySelector('.table-talk__trigger')
@@ -268,11 +293,28 @@ const diagnosticsExpression = `(() => {
   const tableTalkTriggerRect = tableTalkTrigger?.getBoundingClientRect()
   const opponentRail = document.querySelector('.game-v2-opponents')
   const opponentHint = document.querySelector('.game-v2-opponent-scroll-hint')
+  const opponentPosition = document.querySelector('.game-v2-opponent-position[role="status"]')
+  const opponentPositionRect = opponentPosition?.getBoundingClientRect()
   const readinessAction = document.querySelector('.game-v2-result__controls .game-v2-button')
   const gameHeaderOverflow = document.querySelector('.game-v2-header-overflow')
   const lobbyHeaderOverflow = document.querySelector('.header-overflow')
   const clock = document.querySelector('.game-v2-clock, .turn-clock')
   const clockStyle = clock ? getComputedStyle(clock) : null
+  const selectedCard = document.querySelector('.game-v2-hand button.game-card.is-selected[aria-pressed="true"]')
+  const selectedCardRect = selectedCard?.getBoundingClientRect()
+  const selectedCardScroller = selectedCard?.closest('.game-v2-hand__scroller')
+  const gameActionBar = document.querySelector('.game-v2-action-bar')
+  const gameActionBarRect = gameActionBar?.getBoundingClientRect()
+  const lobbyActionSecondary = document.querySelector('.lobby-actions__secondary[data-action-group="secondary"]')
+  const lobbyActionPrimary = document.querySelector('.lobby-actions__primary[data-action-group="primary"]')
+  const lobbyActionSecondaryRect = lobbyActionSecondary?.getBoundingClientRect()
+  const lobbyActionPrimaryRect = lobbyActionPrimary?.getBoundingClientRect()
+  const lobbyContentGridRect = document.querySelector('.lobby-content-grid')?.getBoundingClientRect()
+  const lobbyHintRect = document.querySelector('.lobby-hint')?.getBoundingClientRect()
+  const qaToast = document.querySelector('.toast[data-qa-toast="true"]')
+  const qaToastRect = qaToast?.getBoundingClientRect()
+  const gameResultControls = document.querySelector('.game-v2-result__controls')
+  const resultActionElements = [...document.querySelectorAll('.game-v2-result [data-result-action]')]
   const parseRgb = (value) => (value?.match(/-?\\d*\\.?\\d+/g) ?? []).slice(0, 3).map(Number)
   const relativeLuminance = (value) => {
     const channels = parseRgb(value).map((channel) => {
@@ -308,6 +350,7 @@ const diagnosticsExpression = `(() => {
   const fullyInsideViewport = (box) => Boolean(box
     && box.left >= -1 && box.top >= -1
     && box.right <= innerWidth + 1 && box.bottom <= innerHeight + 1)
+  const perceptible = (element) => Boolean(element && visible(element) && Number(getComputedStyle(element).opacity) > 0.1)
   const describeElement = (element) => element.tagName.toLowerCase()
     + (element.id ? '#' + element.id : '')
     + (typeof element.className === 'string' && element.className
@@ -321,19 +364,44 @@ const diagnosticsExpression = `(() => {
     .slice(index + 1)
     .filter((other) => overlaps(element.getBoundingClientRect(), other.getBoundingClientRect()))
     .map((other) => describeElement(element) + ' <> ' + describeElement(other)))
+  const clippingAncestorLabels = (element) => {
+    if (!element) return []
+    const elementRect = element.getBoundingClientRect()
+    const failures = []
+    for (let ancestor = element.parentElement; ancestor && ancestor !== document.body; ancestor = ancestor.parentElement) {
+      const style = getComputedStyle(ancestor)
+      const ancestorRect = ancestor.getBoundingClientRect()
+      const clipsX = ['auto', 'clip', 'hidden', 'scroll'].includes(style.overflowX)
+      const clipsY = ['auto', 'clip', 'hidden', 'scroll'].includes(style.overflowY)
+      const clippedX = clipsX && (elementRect.left < ancestorRect.left - 1 || elementRect.right > ancestorRect.right + 1)
+      const clippedY = clipsY && (elementRect.top < ancestorRect.top - 1 || elementRect.bottom > ancestorRect.bottom + 1)
+      if (clippedX || clippedY) failures.push(describeElement(ancestor))
+    }
+    return failures
+  }
   const opponentSeats = renderedElements('.game-v2-opponents .game-v2-seat')
   const opponentBadges = renderedElements('.game-v2-opponents .game-v2-seat__right, .game-v2-opponents .game-v2-seat__turn')
+  const opponentSeatContracts = [...document.querySelectorAll('.game-v2-opponents [data-opponent-seat][data-player-id]')]
   const directionRect = document.querySelector('.game-v2-direction')?.getBoundingClientRect()
   const opponentHintRect = opponentHint?.getBoundingClientRect()
   const explanationElements = renderedElements('.game-v2-explanation-toggle, .game-v2-explanation > p')
   const socialControls = renderedElements('.game-v2-log-toggle, .table-talk--game .table-talk__trigger, .game-v2-social-actions > *')
   const fixedControls = renderedElements('.game-v2-log-toggle, .table-talk--game .table-talk__trigger, .game-v2-lead, .game-v2-waiting-strip > summary')
+  const lobbyActionControls = renderedElements('.lobby-actions button')
+  const tableTalkUnexpectedVerticalScrollers = tableTalkChatScroll
+    ? [...tableTalkChatScroll.querySelectorAll('*')]
+      .filter((element) => {
+        const style = getComputedStyle(element)
+        return ['auto', 'scroll'].includes(style.overflowY) && element.scrollHeight > element.clientHeight + 1
+      })
+      .map(describeElement)
+    : []
   const fixedControlsClipped = fixedControls
     .filter((element) => !fullyInsideViewport(element.getBoundingClientRect()))
     .map(describeElement)
   const gamePrimaryAction = document.querySelector('.game-v2-action-bar button:not(:disabled), .game-v2-waiting-player button:not(:disabled), .game-v2-result__controls > .game-v2-button:not(:disabled), .game-v2-reconnect-banner button:not(:disabled), .game-v2-explanation-toggle')
   const gamePrimaryActionRect = gamePrimaryAction?.getBoundingClientRect()
-  const lobbyPrimaryAction = document.querySelector('.lobby-actions button:not(:disabled)')
+  const lobbyPrimaryAction = document.querySelector('.lobby-actions__primary .lobby-actions__deal')
   const lobbyPrimaryActionRect = lobbyPrimaryAction?.getBoundingClientRect()
   const landingPrimaryActionReachable = Boolean(primaryJoinActionRect
     && primaryJoinActionRect.left >= -1
@@ -377,7 +445,30 @@ const diagnosticsExpression = `(() => {
       && lobbyActionsRect.right <= innerWidth + 1 && lobbyActionsRect.bottom <= innerHeight + 1),
     lobbyCardFullyVisibleHorizontally: Boolean(lobbyCardRect && lobbyCardRect.left >= -1 && lobbyCardRect.right <= innerWidth + 1),
     landingPrimaryActionReachable,
+    landingPlayCtaRendered: Boolean(landingPlayCta && rendered(landingPlayCta)),
+    landingPlayCtaVisible: Boolean(landingPlayCta && visible(landingPlayCta)),
+    landingPlayCtaFullyVisible: fullyInsideViewport(landingPlayCtaRect),
+    landingPlayCtaFocusable: Boolean(landingPlayCta instanceof HTMLButtonElement && !landingPlayCta.disabled && landingPlayCta.tabIndex >= 0),
+    landingPlayCtaControlsJoinCard: Boolean(landingPlayTargetId === 'play-bhabhi-thulla' && landingPlayTarget?.classList.contains('join-card')),
     lobbyPrimaryActionReachable,
+    lobbyActionGroupsPresent: Boolean(lobbyActionSecondary && lobbyActionPrimary),
+    lobbyActionGroupsFullyContained: Boolean(
+      lobbyActions?.contains(lobbyActionSecondary)
+      && lobbyActions?.contains(lobbyActionPrimary)
+      && fullyInside(lobbyActionSecondaryRect, lobbyActionsRect)
+      && (fullyInside(lobbyActionPrimaryRect, lobbyActionsRect)
+        || (getComputedStyle(lobbyActionPrimary).position === 'fixed' && fullyInsideViewport(lobbyActionPrimaryRect))),
+    ),
+    lobbySecondaryActionFullyContained: fullyInside(lobbyActionSecondaryRect, lobbyActionsRect),
+    lobbyPrimaryActionFullyVisible: fullyInsideViewport(lobbyActionPrimaryRect),
+    lobbyActionGroupsOverlap: overlaps(lobbyActionSecondaryRect, lobbyActionPrimaryRect),
+    lobbyActionControlsOverlap: pairwiseOverlapLabels(lobbyActionControls),
+    lobbyActionsOverlapContentGrid: overlaps(lobbyActionsRect, lobbyContentGridRect),
+    lobbyActionsOverlapHint: overlaps(lobbyActionsRect, lobbyHintRect),
+    lobbyPrimaryActionOverlapsContentGrid: overlaps(lobbyActionPrimaryRect, lobbyContentGridRect),
+    lobbyPrimaryActionOverlapsHint: overlaps(lobbyActionPrimaryRect, lobbyHintRect),
+    lobbySecondaryActionOverlapsContentGrid: overlaps(lobbyActionSecondaryRect, lobbyContentGridRect),
+    lobbySecondaryActionOverlapsHint: overlaps(lobbyActionSecondaryRect, lobbyHintRect),
     shortViewportOperable,
     landingDecorationOverlapsBenefits: overlaps(landingDecorationRect, landingBenefitsRect),
     resolutionText: resolution?.textContent?.trim().replace(/\\s+/g, ' ') ?? null,
@@ -397,6 +488,22 @@ const diagnosticsExpression = `(() => {
     tableTalkComposerFullyVisible: fullyInside(tableTalkComposerRect, tableTalkDrawerRect),
     tableTalkTextareaFullyVisible: fullyInside(tableTalkTextareaRect, tableTalkDrawerRect),
     tableTalkSendFullyVisible: fullyInside(tableTalkSendRect, tableTalkDrawerRect),
+    tableTalkChatScrollPresent: Boolean(tableTalkChatScroll),
+    tableTalkChatScrollFocusable: Boolean(tableTalkChatScroll && tableTalkChatScroll.tabIndex === 0),
+    tableTalkChatScrollConfigured: Boolean(tableTalkChatScroll && ['auto', 'scroll'].includes(getComputedStyle(tableTalkChatScroll).overflowY)),
+    tableTalkUnexpectedVerticalScrollers,
+    tableTalkPlayerControlsPresent: Boolean(tableTalkPlayerControls),
+    tableTalkPlayerControlsFullyVisible: Boolean(tableTalkPlayerControlsRect
+      && fullyInside(tableTalkPlayerControlsRect, tableTalkChatScrollRect)
+      && fullyInside(tableTalkPlayerControlsRect, tableTalkDrawerRect)
+      && fullyInsideViewport(tableTalkPlayerControlsRect)),
+    tableTalkPlayerControlsSummaryFullyVisible: Boolean(tableTalkPlayerControlsSummaryRect
+      && fullyInside(tableTalkPlayerControlsSummaryRect, tableTalkChatScrollRect)
+      && fullyInside(tableTalkPlayerControlsSummaryRect, tableTalkDrawerRect)
+      && fullyInsideViewport(tableTalkPlayerControlsSummaryRect)),
+    tableTalkComposerIsChatScrollSibling: Boolean(tableTalkChatScroll
+      && tableTalkComposer
+      && tableTalkChatScroll.parentElement === tableTalkComposer.parentElement),
     platformNoticeVisible: Boolean(platformNotice && visible(platformNotice)),
     platformNoticeFullyVisible: Boolean(platformNoticeRect
       && platformNoticeRect.left >= -1 && platformNoticeRect.top >= -1
@@ -417,6 +524,18 @@ const diagnosticsExpression = `(() => {
     opponentBadgesOverlapDirection: overlapLabels(opponentBadges, directionRect),
     opponentBadgesOverlapHint: overlapLabels(opponentBadges, opponentHintRect),
     opponentBadgesOverlapTrick: overlapLabels(opponentBadges, currentTrickRect),
+    opponentPositionPresent: Boolean(opponentPosition),
+    opponentPositionPerceptible: perceptible(opponentPosition),
+    opponentPositionFullyVisible: fullyInsideViewport(opponentPositionRect),
+    opponentPositionOverlapsSeats: overlapLabels(opponentSeats, opponentPositionRect),
+    opponentPositionOverlapsDirection: overlaps(opponentPositionRect, directionRect),
+    opponentPositionOverlapsTrick: overlaps(opponentPositionRect, currentTrickRect),
+    opponentRailRole: opponentRail?.getAttribute('role') ?? null,
+    opponentRailTabIndex: opponentRail?.tabIndex ?? null,
+    opponentRailKeyShortcuts: opponentRail?.getAttribute('aria-keyshortcuts') ?? null,
+    opponentRailPosition: opponentRail?.getAttribute('data-overflow-position') ?? null,
+    opponentSeatContractCount: opponentSeatContracts.length,
+    opponentSeatIdsUnique: new Set(opponentSeatContracts.map((seat) => seat.getAttribute('data-player-id'))).size === opponentSeatContracts.length,
     trickOverlapsStatus: overlaps(currentTrickRect, gameStatusRect),
     explanationOverlapsMatchLog: overlapLabels(explanationElements, matchLogRect),
     explanationOverlapsTableTalk: overlapLabels(explanationElements, tableTalkTriggerRect),
@@ -428,6 +547,19 @@ const diagnosticsExpression = `(() => {
     gamePrimaryActionVisible: Boolean(gamePrimaryAction && visible(gamePrimaryAction)),
     gamePrimaryActionFullyVisible: gamePrimaryActionRect ? fullyInsideViewport(gamePrimaryActionRect) : null,
     gamePrimarySurfacesFullyVisible,
+    selectedCardPresent: Boolean(selectedCard),
+    selectedCardVisible: Boolean(selectedCard && visible(selectedCard)),
+    selectedCardFullyInsideViewport: fullyInsideViewport(selectedCardRect),
+    selectedCardFullyInsideScroller: Boolean(selectedCardRect && selectedCardScroller
+      && fullyInside(selectedCardRect, selectedCardScroller.getBoundingClientRect())),
+    selectedCardClippingAncestors: clippingAncestorLabels(selectedCard),
+    selectedCardOverlapsActionBar: overlaps(selectedCardRect, gameActionBarRect),
+    qaToastVisible: Boolean(qaToast && perceptible(qaToast)),
+    qaToastFullyVisible: fullyInsideViewport(qaToastRect),
+    qaToastOverlapsGameActionBar: overlaps(qaToastRect, gameActionBarRect),
+    qaToastOverlapsGamePrimaryAction: overlaps(qaToastRect, gamePrimaryActionRect),
+    qaToastOverlapsLobbyActions: overlaps(qaToastRect, lobbyActionsRect),
+    qaToastOverlapsLobbyPrimaryAction: overlaps(qaToastRect, lobbyActionPrimaryRect),
     clockVisible: Boolean(clock && visible(clock)),
     clockColor: clockStyle?.color ?? null,
     clockBackgroundColor: clockStyle?.backgroundColor ?? null,
@@ -440,6 +572,12 @@ const diagnosticsExpression = `(() => {
     waitingRemoveControls: document.querySelectorAll('.game-v2-remove-waiting').length,
     waitingReadyControlVisible: Boolean(document.querySelector('.game-v2-waiting-player .game-v2-button') && visible(document.querySelector('.game-v2-waiting-player .game-v2-button'))),
     readinessActionText: readinessAction?.textContent?.trim().replace(/\\s+/g, ' ') ?? '',
+    resultActionNames: resultActionElements.map((element) => element.getAttribute('data-result-action')),
+    resultReadyAriaPressed: document.querySelector('[data-result-action="ready"]')?.getAttribute('aria-pressed') ?? null,
+    resultActionsOutsideControls: resultActionElements
+      .filter((element) => !gameResultControls?.contains(element))
+      .map(describeElement),
+    resultBlockerPresent: Boolean(document.querySelector('.game-v2-result__blocker[role="status"]')),
     matchLogText: document.querySelector('.game-v2-activity')?.textContent?.trim().replace(/\\s+/g, ' ') ?? '',
     handVisible: Boolean(document.querySelector('.game-v2-hand') && visible(document.querySelector('.game-v2-hand'))),
     liveReactionVisible: Boolean(document.querySelector('.game-v2-live-reaction')),
@@ -565,14 +703,189 @@ async function inspectLandingSeo(cdp, width, height) {
   return evaluate(cdp, landingSeoDiagnosticsExpression)
 }
 
-async function capture(cdp, name, width, height) {
+async function capture(cdp, name, width, height, prepare) {
   await setViewport(cdp, width, height)
   await waitForResponsiveLayout(cdp)
+  if (prepare) {
+    await prepare()
+    await waitForResponsiveLayout(cdp)
+  }
   const diagnostics = await evaluate(cdp, diagnosticsExpression)
   const screenshot = await cdp.send('Page.captureScreenshot', { format: 'png', fromSurface: true })
   const outputPath = join(OUTPUT_DIR, `${name}-${width}x${height}.png`)
   await writeFile(outputPath, Buffer.from(screenshot.data, 'base64'))
   return { outputPath, ...diagnostics }
+}
+
+async function injectQaToast(cdp) {
+  const injected = await evaluate(cdp, `(() => {
+    document.querySelector('.toast[data-qa-toast="true"]')?.remove()
+    const toast = document.createElement('div')
+    toast.className = 'toast toast--info'
+    toast.dataset.qaToast = 'true'
+    toast.dataset.tone = 'info'
+    toast.setAttribute('role', 'status')
+    toast.setAttribute('aria-live', 'polite')
+    toast.textContent = 'Layout feedback'
+    document.body.append(toast)
+    return true
+  })()`)
+  if (!injected) throw new Error('Could not inject the deterministic QA toast.')
+}
+
+async function removeQaToast(cdp) {
+  await evaluate(cdp, `document.querySelector('.toast[data-qa-toast="true"]')?.remove()`)
+}
+
+async function selectVisibleQaCard(cdp) {
+  const selected = await evaluate(cdp, `(() => {
+    const scroller = document.querySelector('.game-v2-hand__scroller')
+    if (!scroller) return false
+    const scrollerRect = scroller.getBoundingClientRect()
+    const cards = [...document.querySelectorAll('.game-v2-hand button.game-card--selectable:not(:disabled)')]
+      .filter((card) => {
+        const rect = card.getBoundingClientRect()
+        return rect.left >= scrollerRect.left - 1 && rect.right <= scrollerRect.right + 1
+          && rect.top >= scrollerRect.top - 1 && rect.bottom <= scrollerRect.bottom + 1
+      })
+      .sort((first, second) => {
+        const center = scrollerRect.left + scrollerRect.width / 2
+        const firstRect = first.getBoundingClientRect()
+        const secondRect = second.getBoundingClientRect()
+        return Math.abs(firstRect.left + firstRect.width / 2 - center) - Math.abs(secondRect.left + secondRect.width / 2 - center)
+      })
+    cards[0]?.click()
+    return Boolean(cards[0])
+  })()`)
+  if (!selected) throw new Error('Could not select a fully visible card for clipping QA.')
+  await waitForExpression(cdp, `Boolean(document.querySelector('.game-v2-hand button.game-card.is-selected[aria-pressed="true"]'))`)
+}
+
+async function revealTableTalkPlayerControls(cdp) {
+  const revealed = await evaluate(cdp, `(() => {
+    const owner = document.querySelector('.table-talk__chat-scroll[data-scroll-owner="chat"]')
+    const summary = owner?.querySelector('.table-talk__player-controls summary')
+    if (!owner || !summary) return false
+    summary.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' })
+    return true
+  })()`)
+  if (!revealed) throw new Error('Table Talk did not expose its player-controls scroll target.')
+}
+
+async function inspectLandingPlayCtaInteraction(cdp) {
+  const clicked = await evaluate(cdp, `(() => {
+    const button = document.querySelector('.landing-play-cta[data-action="focus-create-room"][aria-controls="play-bhabhi-thulla"]')
+    button?.click()
+    return Boolean(button)
+  })()`)
+  if (!clicked) return { clicked: false, targetVisible: false, nameInputFocused: false }
+  await waitForExpression(cdp, `document.activeElement?.id === 'player-name'`)
+  await waitForResponsiveLayout(cdp)
+  return evaluate(cdp, `(() => {
+    const target = document.getElementById('play-bhabhi-thulla')
+    const rect = target?.getBoundingClientRect()
+    return {
+      clicked: true,
+      targetVisible: Boolean(rect && rect.bottom > 0 && rect.top < innerHeight),
+      nameInputFocused: document.activeElement?.id === 'player-name',
+    }
+  })()`)
+}
+
+async function inspectOpponentKeyboardNavigation(cdp, width, height, language = 'en') {
+  await setViewport(cdp, width, height)
+  await cdp.send('Page.navigate', { url: CLIENT_URL })
+  await waitForExpression(cdp, `Boolean(document.body)`)
+  await evaluate(cdp, `localStorage.setItem('thulla:language', ${JSON.stringify(language)})`)
+  await cdp.send('Page.navigate', { url: `${CLIENT_URL}/?qa=many-players` })
+  await waitForExpression(cdp, `Boolean(document.querySelector('.game-v2-opponents.is-keyboard-scrollable[data-overflow-position]'))`)
+  await waitForResponsiveLayout(cdp)
+  return evaluate(cdp, `(async () => {
+    const rail = document.querySelector('.game-v2-opponents.is-keyboard-scrollable[data-overflow-position]')
+    const indicator = document.querySelector('.game-v2-opponent-position[role="status"]')
+    const seats = [...(rail?.querySelectorAll('[data-opponent-seat][data-player-id]') ?? [])]
+    if (!rail || !indicator || seats.length < 2) return { available: false }
+    const press = async (key) => {
+      rail.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+      await new Promise((resolve) => setTimeout(resolve, 850))
+      return Number(rail.dataset.overflowPosition)
+    }
+    const edgeOffsets = () => {
+      const railBounds = rail.getBoundingClientRect()
+      const sortedSeats = [...seats].sort((first, second) => first.getBoundingClientRect().left - second.getBoundingClientRect().left)
+      return {
+        first: Math.abs(sortedSeats[0].getBoundingClientRect().left - railBounds.left),
+        last: Math.abs(sortedSeats[sortedSeats.length - 1].getBoundingClientRect().right - railBounds.right),
+      }
+    }
+    rail.focus({ preventScroll: true })
+    const homePosition = await press('Home')
+    const homeScroll = rail.scrollLeft
+    const homeEdgeOffset = edgeOffsets().first
+    const arrowPosition = await press('ArrowRight')
+    const arrowScroll = rail.scrollLeft
+    const endPosition = await press('End')
+    const endScroll = rail.scrollLeft
+    const endEdgeOffset = edgeOffsets().last
+    const maxScroll = rail.scrollWidth - rail.clientWidth
+    return {
+      available: true,
+      focused: document.activeElement === rail,
+      role: rail.getAttribute('role'),
+      tabIndex: rail.tabIndex,
+      keyShortcuts: rail.getAttribute('aria-keyshortcuts'),
+      seatCount: seats.length,
+      uniqueSeatIds: new Set(seats.map((seat) => seat.dataset.playerId)).size === seats.length,
+      indicatorDescribedBy: rail.getAttribute('aria-describedby') === indicator.id,
+      indicatorPerceptible: Number(getComputedStyle(indicator).opacity) > 0.1,
+      homePosition,
+      arrowPosition,
+      endPosition,
+      homeScroll,
+      arrowScroll,
+      endScroll,
+      maxScroll,
+      homeEdgeOffset,
+      endEdgeOffset,
+      documentDirection: document.documentElement.dir,
+      documentLanguage: document.documentElement.lang,
+    }
+  })()`)
+}
+
+async function inspectResultActionReachability(cdp, width, height) {
+  await setViewport(cdp, width, height)
+  await cdp.send('Page.navigate', { url: `${CLIENT_URL}/?qa=finished` })
+  await waitForExpression(cdp, `Boolean(document.querySelector('.game-v2-result__card [data-result-action="ready"]'))`)
+  await waitForResponsiveLayout(cdp)
+  return evaluate(cdp, `(async () => {
+    const card = document.querySelector('.game-v2-result__card')
+    const controls = card?.querySelector('.game-v2-result__controls')
+    const actionElements = [...(controls?.querySelectorAll('[data-result-action]') ?? [])]
+    const inside = (inner, outer) => Boolean(inner && outer
+      && inner.left >= outer.left - 1 && inner.top >= outer.top - 1
+      && inner.right <= outer.right + 1 && inner.bottom <= outer.bottom + 1)
+    const actions = []
+    for (const element of actionElements) {
+      element.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' })
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+      const rect = element.getBoundingClientRect()
+      const cardRect = card.getBoundingClientRect()
+      const controlsRect = controls.getBoundingClientRect()
+      actions.push({
+        action: element.getAttribute('data-result-action'),
+        fullyVisible: inside(rect, cardRect) && inside(rect, controlsRect)
+          && rect.left >= -1 && rect.top >= -1 && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1,
+        focusable: !element.disabled && element.tabIndex >= 0,
+        ariaPressed: element.getAttribute('aria-pressed'),
+      })
+    }
+    return {
+      actions,
+      blockerPresent: Boolean(card?.querySelector('.game-v2-result__blocker[role="status"]')),
+      duplicateActions: [...new Set(actions.map(({ action }) => action).filter((action, index, all) => all.indexOf(action) !== index))],
+    }
+  })()`)
 }
 
 function waitForState(socket, latestStates, predicate, timeoutMs = 15_000) {
@@ -626,6 +939,9 @@ function assertCollisionFree(result, context) {
   assert(result.opponentBadgesOverlapDirection.length === 0, `${context} places RIGHT/TURN badges over the direction cue: ${JSON.stringify(result.opponentBadgesOverlapDirection)}`)
   assert(result.opponentBadgesOverlapHint.length === 0, `${context} places RIGHT/TURN badges over the swipe cue: ${JSON.stringify(result.opponentBadgesOverlapHint)}`)
   assert(result.opponentBadgesOverlapTrick.length === 0, `${context} places RIGHT/TURN badges over the current trick: ${JSON.stringify(result.opponentBadgesOverlapTrick)}`)
+  assert(result.opponentPositionOverlapsSeats.length === 0, `${context} places the opponent-position indicator over a seat: ${JSON.stringify(result.opponentPositionOverlapsSeats)}`)
+  assert(!result.opponentPositionOverlapsDirection, `${context} overlaps the opponent-position indicator and direction cue.`)
+  assert(!result.opponentPositionOverlapsTrick, `${context} overlaps the opponent-position indicator and current trick.`)
   assert(!result.trickOverlapsStatus, `${context} overlaps the current trick and status panel.`)
   assert(result.explanationOverlapsMatchLog.length === 0, `${context} places the explanation control over Match Log: ${JSON.stringify(result.explanationOverlapsMatchLog)}`)
   assert(result.explanationOverlapsTableTalk.length === 0, `${context} places the explanation control over Table Talk: ${JSON.stringify(result.explanationOverlapsTableTalk)}`)
@@ -701,6 +1017,16 @@ try {
     const context = `Landing at ${viewport.width}x${viewport.height}`
     assertShortViewport(result, context)
     assert(result.landingPrimaryActionReachable, `${context} cannot reach the create-room action by scrolling.`)
+    if (LANDING_PLAY_CTA_VIEWPORTS.has(viewport.name)) {
+      assert(result.landingPlayCtaRendered && result.landingPlayCtaVisible, `${context} does not show the short-screen Play shortcut.`)
+      assert(result.landingPlayCtaFullyVisible, `${context} clips the short-screen Play shortcut.`)
+      assert(result.landingPlayCtaFocusable, `${context} does not expose the Play shortcut as a focusable button.`)
+      assert(result.landingPlayCtaControlsJoinCard, `${context} does not connect the Play shortcut to the create-room panel.`)
+      const interaction = await inspectLandingPlayCtaInteraction(cdp)
+      result.landingPlayCtaInteraction = interaction
+      assert(interaction.clicked && interaction.targetVisible, `${context} Play shortcut does not reveal the create-room panel.`)
+      assert(interaction.nameInputFocused, `${context} Play shortcut does not focus the player-name field.`)
+    }
   }
 
   const landingSeoViewports = {}
@@ -777,11 +1103,21 @@ try {
   const fixtureResults = {}
   for (const fixture of fixtureDefinitions) {
     const fixtureUrl = `${CLIENT_URL}/?qa=${fixture.mode}`
-    const captureFreshFixture = async (name, width, height, prepare) => {
+    const fixturePrepare = fixture.mode === 'playing'
+      ? async () => { await selectVisibleQaCard(cdp); await injectQaToast(cdp) }
+      : fixture.mode === 'lobby'
+        ? async () => injectQaToast(cdp)
+        : null
+    const captureFreshFixture = async (name, width, height, extraPrepare) => {
       await cdp.send('Page.navigate', { url: fixtureUrl })
       await waitForExpression(cdp, `Boolean(document.querySelector(${JSON.stringify(fixture.selector)}))`)
-      if (prepare) await prepare()
-      return capture(cdp, name, width, height)
+      const prepare = fixturePrepare || extraPrepare
+        ? async () => {
+            if (fixturePrepare) await fixturePrepare()
+            if (extraPrepare) await extraPrepare()
+          }
+        : undefined
+      return capture(cdp, name, width, height, prepare)
     }
     const portrait = await captureFreshFixture(`fixture-${fixture.mode}-mobile`, 390, 844)
     const landscape = await captureFreshFixture(`fixture-${fixture.mode}-landscape`, 844, 390)
@@ -810,13 +1146,14 @@ try {
     }
     let chatOpen = null
     if (fixture.mode === 'playing') {
+      await removeQaToast(cdp)
       await evaluate(cdp, `document.querySelector('.table-talk__trigger')?.click()`)
       await waitForExpression(cdp, `Boolean(document.querySelector('.table-talk__drawer:not([hidden])'))`)
       chatOpen = {
         portrait: await capture(cdp, 'fixture-playing-chat-open-mobile', 390, 844),
-        shortPortrait: await capture(cdp, 'fixture-playing-chat-open-short-phone', 320, 480),
+        shortPortrait: await capture(cdp, 'fixture-playing-chat-open-short-phone', 320, 480, async () => revealTableTalkPlayerControls(cdp)),
         phoneLandscape: await capture(cdp, 'fixture-playing-chat-open-phone-landscape', 667, 375),
-        landscape: await capture(cdp, 'fixture-playing-chat-open-landscape', 844, 390),
+        landscape: await capture(cdp, 'fixture-playing-chat-open-landscape', 844, 390, async () => revealTableTalkPlayerControls(cdp)),
         desktop: await capture(cdp, 'fixture-playing-chat-open-desktop', 1366, 768),
         shortDesktop: await capture(cdp, 'fixture-playing-chat-open-short-desktop', 1366, 600),
       }
@@ -840,6 +1177,10 @@ try {
         assert(result.tableTalkComposerFullyVisible, `Table Talk composer was partially clipped at ${result.viewport.join('x')}.`)
         assert(result.tableTalkTextareaFullyVisible, `Table Talk textarea was clipped at ${result.viewport.join('x')}.`)
         assert(result.tableTalkSendFullyVisible, `Table Talk send button was clipped at ${result.viewport.join('x')}.`)
+        assert(result.tableTalkChatScrollPresent && result.tableTalkChatScrollConfigured, `Table Talk lacks its dedicated chat scroller at ${result.viewport.join('x')}.`)
+        assert(result.tableTalkChatScrollFocusable, `Table Talk chat content is not keyboard-focusable at ${result.viewport.join('x')}.`)
+        assert(result.tableTalkComposerIsChatScrollSibling, `Table Talk composer is nested inside the chat scroller at ${result.viewport.join('x')}.`)
+        assert(result.tableTalkUnexpectedVerticalScrollers.length === 0, `Table Talk has nested vertical scrollers at ${result.viewport.join('x')}: ${JSON.stringify(result.tableTalkUnexpectedVerticalScrollers)}`)
         assert(!result.pageOverflowX, `Open Table Talk caused horizontal overflow at ${result.viewport.join('x')}.`)
         assert(result.touchViolations.length === 0, `Open Table Talk has touch targets under 44px at ${result.viewport.join('x')}: ${JSON.stringify(result.touchViolations)}`)
         assert(result.unnamedControls.length === 0, `Open Table Talk has unnamed controls at ${result.viewport.join('x')}.`)
@@ -853,8 +1194,85 @@ try {
       assert(!chatOpen.desktop.tableTalkOverlapsRightSeat, 'Desktop Table Talk covers the right-hand opponent.')
       assert(!chatOpen.desktop.tableTalkOverlapsGameTable, 'Desktop Table Talk overlays the game table instead of docking beside it.')
       assert(!chatOpen.desktop.tableTalkOverlapsHand, 'Desktop Table Talk overlays the hand instead of docking beside it.')
+      for (const [name, result] of [['320x480', chatOpen.shortPortrait], ['844x390', chatOpen.landscape]]) {
+        assert(result.tableTalkPlayerControlsPresent, `Table Talk player controls are missing at ${name}.`)
+        assert(result.tableTalkPlayerControlsFullyVisible && result.tableTalkPlayerControlsSummaryFullyVisible, `Table Talk player controls cannot be fully revealed at ${name}.`)
+        assert(result.tableTalkComposerFullyVisible, `Revealing Table Talk player controls clips the composer at ${name}.`)
+      }
     }
   }
+
+  const lobbyPolishResults = [
+    fixtureResults.lobby.portrait,
+    fixtureResults.lobby.landscape,
+    fixtureResults.lobby.narrow,
+    ...Object.values(fixtureResults.lobby.shortScreens),
+  ].filter(Boolean)
+  for (const result of lobbyPolishResults) {
+    const context = `Lobby polish at ${result.viewport.join('x')}`
+    assert(result.lobbyActionGroupsPresent && result.lobbyActionGroupsFullyContained, `${context} is missing the primary/secondary action-group contract.`)
+    assert(result.lobbySecondaryActionFullyContained, `${context} places secondary actions outside the lobby action flow.`)
+    assert(result.lobbyPrimaryActionFullyVisible, `${context} does not show the primary action in the initial viewport.`)
+    assert(!result.lobbyActionGroupsOverlap, `${context} overlaps primary and secondary action groups.`)
+    assert(result.lobbyActionControlsOverlap.length === 0, `${context} overlaps action controls: ${JSON.stringify(result.lobbyActionControlsOverlap)}`)
+    assert(!result.lobbyActionsOverlapContentGrid && !result.lobbyActionsOverlapHint, `${context} places the action container over lobby content.`)
+    assert(!result.lobbyPrimaryActionOverlapsContentGrid && !result.lobbyPrimaryActionOverlapsHint, `${context} places the sticky primary action over lobby content.`)
+    assert(!result.lobbySecondaryActionOverlapsContentGrid && !result.lobbySecondaryActionOverlapsHint, `${context} places secondary actions over lobby content.`)
+    assert(result.qaToastVisible && result.qaToastFullyVisible, `${context} does not fully show the deterministic toast.`)
+    assert(!result.qaToastOverlapsLobbyActions && !result.qaToastOverlapsLobbyPrimaryAction, `${context} places the toast over lobby actions.`)
+  }
+
+  const selectedCardResults = [
+    fixtureResults.playing.portrait,
+    fixtureResults.playing.landscape,
+    fixtureResults.playing.narrow,
+    fixtureResults.playing.shortDesktop,
+    ...Object.values(fixtureResults.playing.shortScreens),
+  ].filter(Boolean)
+  for (const result of selectedCardResults) {
+    const context = `Selected-card polish at ${result.viewport.join('x')}`
+    assert(result.selectedCardPresent && result.selectedCardVisible, `${context} did not exercise a selected card.`)
+    assert(result.selectedCardFullyInsideViewport && result.selectedCardFullyInsideScroller, `${context} clips the selected card.`)
+    assert(result.selectedCardClippingAncestors.length === 0, `${context} clips the selected card through: ${JSON.stringify(result.selectedCardClippingAncestors)}`)
+    assert(!result.selectedCardOverlapsActionBar, `${context} places the selected card over the action bar.`)
+    assert(result.qaToastVisible && result.qaToastFullyVisible, `${context} does not fully show the deterministic toast.`)
+    assert(!result.qaToastOverlapsGameActionBar && !result.qaToastOverlapsGamePrimaryAction, `${context} places the toast over gameplay actions.`)
+  }
+
+  const opponentKeyboard = {
+    shortPortrait: await inspectOpponentKeyboardNavigation(cdp, 320, 480),
+    rtlShortPortrait: await inspectOpponentKeyboardNavigation(cdp, 320, 480, 'ur'),
+    landscape: await inspectOpponentKeyboardNavigation(cdp, 844, 390),
+  }
+  for (const [name, result] of Object.entries(opponentKeyboard)) {
+    const shortcuts = new Set((result.keyShortcuts ?? '').split(/\s+/).filter(Boolean))
+    assert(result.available && result.focused, `Crowded opponent rail is not keyboard-focusable in ${name}.`)
+    assert(result.role === 'region' && result.tabIndex === 0, `Crowded opponent rail lacks region/tabindex semantics in ${name}.`)
+    assert(['ArrowLeft', 'ArrowRight', 'Home', 'End'].every((key) => shortcuts.has(key)), `Crowded opponent rail lacks declared key shortcuts in ${name}: ${result.keyShortcuts}`)
+    assert(result.uniqueSeatIds && result.seatCount === 7, `Crowded opponent rail has invalid seat identities in ${name}.`)
+    assert(result.indicatorDescribedBy && result.indicatorPerceptible, `Crowded opponent rail does not expose its visible position status in ${name}.`)
+    assert(result.homePosition === 1 && result.arrowPosition === 2 && result.endPosition === result.seatCount, `Crowded opponent rail keyboard navigation failed in ${name}: ${JSON.stringify(result)}`)
+    assert(result.homeEdgeOffset <= 3 && result.endEdgeOffset <= 3, `Crowded opponent rail did not reach both physical edges in ${name}: ${JSON.stringify(result)}`)
+    if (name === 'rtlShortPortrait') assert(result.documentDirection === 'rtl' && result.documentLanguage === 'ur-PK', `RTL opponent QA did not load the Urdu document contract: ${JSON.stringify(result)}`)
+  }
+
+  const resultActionReachability = {
+    shortPortrait: await inspectResultActionReachability(cdp, 320, 480),
+    landscape: await inspectResultActionReachability(cdp, 844, 390),
+  }
+  const requiredResultActions = ['ready', 'invite', 'leave', 'add-bot']
+  for (const [name, result] of Object.entries(resultActionReachability)) {
+    const byAction = new Map(result.actions.map((action) => [action.action, action]))
+    assert(result.blockerPresent, `Finished dialog omits its explicit blocker status in ${name}.`)
+    assert(result.duplicateActions.length === 0, `Finished dialog duplicates result actions in ${name}: ${result.duplicateActions.join(', ')}`)
+    for (const actionName of requiredResultActions) {
+      const action = byAction.get(actionName)
+      assert(Boolean(action), `Finished dialog omits ${actionName} in ${name}.`)
+      assert(Boolean(action?.fullyVisible && action?.focusable), `Finished dialog cannot reach ${actionName} in ${name}.`)
+    }
+    assert(['true', 'false'].includes(byAction.get('ready')?.ariaPressed), `Finished dialog ready action is not an aria-pressed toggle in ${name}.`)
+  }
+
   assert(fixtureResults.lobby.landscape.lobbyActionsVisible, 'Landscape lobby actions are below the visible viewport.')
   assert(fixtureResults.lobby.landscape.lobbyActionsFullyVisible, 'Landscape lobby actions are clipped.')
   assert(!fixtureResults.lobby.landscape.pageOverflowY, 'The compact landscape lobby still scrolls the whole page.')
@@ -866,6 +1284,9 @@ try {
   assert(fixtureResults['many-players'].portrait.opponentRailOverflow, 'The crowded-player fixture does not exercise opponent overflow.')
   assert(fixtureResults['many-players'].portrait.opponentHintVisible, 'A crowded opponent rail has no visible swipe cue.')
   assert(fixtureResults['many-players'].narrow.opponentHintVisible, 'The 320px crowded opponent rail has no visible swipe cue.')
+  assert(fixtureResults['many-players'].portrait.opponentPositionPresent && fixtureResults['many-players'].portrait.opponentPositionFullyVisible, 'The crowded opponent rail has no contained position indicator.')
+  assert(fixtureResults['many-players'].portrait.opponentRailRole === 'region' && fixtureResults['many-players'].portrait.opponentRailTabIndex === 0, 'The crowded opponent rail lacks focusable-region semantics.')
+  assert(fixtureResults['many-players'].portrait.opponentSeatContractCount === 7 && fixtureResults['many-players'].portrait.opponentSeatIdsUnique, 'The crowded opponent seats lack stable unique player contracts.')
   assert(fixtureResults.resolving.portrait.lastCardVisible, 'The resolving fixture does not identify the THULLA card.')
   assert(fixtureResults.resolving.portrait.thullaStatusVisible, 'The portrait resolving fixture does not show the THULLA announcement.')
   assert(!fixtureResults.resolving.portrait.thullaStatusOverlapsLastCard, 'The portrait THULLA announcement covers the final card.')
@@ -896,6 +1317,10 @@ try {
   assert(!fixtureResults.queued.portrait.matchLogText.includes('reconnected'), 'A newly queued friend is mislabeled as reconnected.')
   assert(fixtureResults.playing.portrait.tableTalkLabelVisible, 'The mobile Table Talk trigger hides its text label.')
   assert(fixtureResults['finished-waiting'].portrait.waitingRemoveControls >= 5, 'The finished screen does not expose host controls for every waiting player.')
+  assert(['ready', 'invite', 'leave', 'add-bot'].every((action) => fixtureResults.finished.portrait.resultActionNames.includes(action)), `The finished screen is missing required result actions: ${JSON.stringify(fixtureResults.finished.portrait.resultActionNames)}`)
+  assert(['true', 'false'].includes(fixtureResults.finished.portrait.resultReadyAriaPressed), 'The finished-screen readiness action is not exposed as a toggle.')
+  assert(fixtureResults.finished.portrait.resultActionsOutsideControls.length === 0, `Finished actions escape the result control region: ${JSON.stringify(fixtureResults.finished.portrait.resultActionsOutsideControls)}`)
+  assert(fixtureResults.finished.portrait.resultBlockerPresent, 'The finished screen does not expose the next-round blocker as status text.')
   assert(/cancel readiness/i.test(fixtureResults.finished.portrait.readinessActionText), `The finished-round ready action is ambiguous: ${fixtureResults.finished.portrait.readinessActionText}`)
   assert(!fixtureResults.finished.portrait.handVisible, 'The finished-round result leaves the old hand visible.')
   assert(!fixtureResults.finished.landscape.handVisible, 'The landscape finished-round result leaves the old hand visible.')
@@ -927,7 +1352,7 @@ try {
   await emitAck(host, 'game:start', {})
   let room = await playingState
 
-  while (room.game?.phase !== 'resolving' && room.game?.trick.length < room.players.length - 1) {
+  while (room.game?.phase !== 'resolving' && room.game?.trick.length < participants.length - 1) {
     const turnId = room.game?.currentTurnId
     const participant = participants.find(({ credentials }) => credentials.playerId === turnId)
     if (!participant || !turnId) throw new Error('Could not identify a player while preparing the opening trick.')
@@ -1061,6 +1486,10 @@ try {
       platformNotice,
     },
     fixtures: fixtureResults,
+    polish: {
+      opponentKeyboard,
+      resultActionReachability,
+    },
     resolution: {
       observedAt: resolutionObservedAt,
       serverDeadline: resolvingState.game?.resolutionEndsAt,

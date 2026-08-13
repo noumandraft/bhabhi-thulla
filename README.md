@@ -125,7 +125,7 @@ The included `render.yaml` defines the web service.
 1. Provision persistent Redis-compatible storage if resumable matches are required. Copy its secret TLS connection URL into `REDIS_URL`.
 2. Push the repository to GitHub.
 3. In Render, create a Blueprint from the repository, or create a Node web service manually.
-4. Build with `npm ci && npm run build:server`.
+4. Build with `npm ci --include=dev && npm run build:server`. The server is compiled from TypeScript, so Render must install the compiler and declaration packages even when `NODE_ENV=production`.
 5. Start with `npm start`.
 6. Set `CLIENT_ORIGIN=https://thulla.joypad.fun`. Add local/staging origins as a comma-separated list only when needed.
 7. Render supplies `PORT` and `RENDER_GIT_COMMIT`; use `COMMIT_SHA` on another host if it does not provide a revision automatically.

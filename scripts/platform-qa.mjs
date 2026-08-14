@@ -170,6 +170,15 @@ check(!installHandler.includes('skipWaiting'), 'Service worker must not activate
 check((serviceWorker.match(/skipWaiting\(\)/g) ?? []).length === 1, 'Service worker may call skipWaiting only from the explicit update message handler.')
 check((main.match(/SKIP_WAITING/g) ?? []).length === 1, 'Client may request service-worker activation only from the update action.')
 check(main.includes('updateReloadRequested = true'), 'Client must reload only after the player requests an update.')
+check(
+  main.includes('const serviceWorkerScript = `/sw.js?v=${encodeURIComponent(__BUILD_COMMIT__)}`'),
+  'Service-worker registration must use a release-specific URL derived from the build commit.',
+)
+check(
+  /navigator\.serviceWorker\.register\(serviceWorkerScript,\s*\{\s*scope: '\/',\s*updateViaCache: 'none',?\s*\}\)/m.test(main),
+  'Service-worker registration must bypass the browser HTTP cache for update checks.',
+)
+check(!main.includes("navigator.serviceWorker.register('/sw.js'"), 'Service-worker registration must not use the cache-prone plain /sw.js URL.')
 check(html.includes('id="platform-notices"'), 'The offline/update announcement region is missing.')
 
 const liveGuard = serviceWorker.indexOf('if (url.origin !== self.location.origin || isLiveRequest(url)) return')

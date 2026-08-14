@@ -143,6 +143,7 @@ function showUpdateNotice(registration: ServiceWorkerRegistration) {
 function registerServiceWorker() {
   if (!('serviceWorker' in navigator) || !import.meta.env.PROD) return
 
+  const serviceWorkerScript = `/sw.js?v=${encodeURIComponent(__BUILD_COMMIT__)}`
   let reloadForUpdate = false
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!updateReloadRequested || reloadForUpdate) return
@@ -154,7 +155,10 @@ function registerServiceWorker() {
 
   window.addEventListener('load', async () => {
     try {
-      const registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      const registration = await navigator.serviceWorker.register(serviceWorkerScript, {
+        scope: '/',
+        updateViaCache: 'none',
+      })
       if (registration.waiting) showUpdateNotice(registration)
       registration.addEventListener('updatefound', () => {
         const installingWorker = registration.installing

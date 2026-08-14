@@ -18,6 +18,7 @@ const SHORT_PHONE_VIEWPORTS = [
   { name: 'phone-320x568', width: 320, height: 568 },
   { name: 'phone-360x640', width: 360, height: 640 },
   { name: 'phone-375x512', width: 375, height: 512 },
+  { name: 'phone-375x667', width: 375, height: 667 },
   { name: 'phone-390x667', width: 390, height: 667 },
   { name: 'phone-430x932', width: 430, height: 932 },
   { name: 'landscape-667x375', width: 667, height: 375 },
@@ -364,6 +365,16 @@ const diagnosticsExpression = `(() => {
     .slice(index + 1)
     .filter((other) => overlaps(element.getBoundingClientRect(), other.getBoundingClientRect()))
     .map((other) => describeElement(element) + ' <> ' + describeElement(other)))
+  const pairwiseGapLabels = (elements, minimumGap) => elements.flatMap((element, index) => elements
+    .slice(index + 1)
+    .filter((other) => {
+      const first = element.getBoundingClientRect()
+      const second = other.getBoundingClientRect()
+      const horizontalGap = Math.max(first.left - second.right, second.left - first.right, 0)
+      const verticalGap = Math.max(first.top - second.bottom, second.top - first.bottom, 0)
+      return Math.hypot(horizontalGap, verticalGap) < minimumGap
+    })
+    .map((other) => describeElement(element) + ' <> ' + describeElement(other)))
   const clippingAncestorLabels = (element) => {
     if (!element) return []
     const elementRect = element.getBoundingClientRect()
@@ -542,6 +553,9 @@ const diagnosticsExpression = `(() => {
     socialControlsOverlap: pairwiseOverlapLabels(socialControls),
     socialControlsOverlapStatus: overlapLabels(socialControls, gameStatusRect),
     socialControlsOverlapHand: overlapLabels(socialControls, gameHandRect),
+    compactUtilityGapViolations: innerWidth <= 720 && innerHeight >= innerWidth
+      ? pairwiseGapLabels(fixedControls, 8)
+      : [],
     fixedControlsOverlapHand: overlapLabels(fixedControls, gameHandRect),
     fixedControlsClipped,
     gamePrimaryActionVisible: Boolean(gamePrimaryAction && visible(gamePrimaryAction)),
@@ -948,6 +962,7 @@ function assertCollisionFree(result, context) {
   assert(result.socialControlsOverlap.length === 0, `${context} overlaps social controls: ${JSON.stringify(result.socialControlsOverlap)}`)
   assert(result.socialControlsOverlapStatus.length === 0, `${context} places social controls over the status panel: ${JSON.stringify(result.socialControlsOverlapStatus)}`)
   assert(result.socialControlsOverlapHand.length === 0, `${context} places social controls over the hand: ${JSON.stringify(result.socialControlsOverlapHand)}`)
+  assert(result.compactUtilityGapViolations.length === 0, `${context} leaves less than 8px between compact utility controls: ${JSON.stringify(result.compactUtilityGapViolations)}`)
   assert(result.fixedControlsOverlapHand.length === 0, `${context} places fixed table controls over the hand: ${JSON.stringify(result.fixedControlsOverlapHand)}`)
   assert(result.fixedControlsClipped.length === 0, `${context} clips fixed table controls: ${JSON.stringify(result.fixedControlsClipped)}`)
 }

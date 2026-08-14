@@ -2335,12 +2335,47 @@ body:has(.game-v2-shell) {
   }
 
   .game-v2-log-toggle {
+    left: auto;
+    inset-inline-start: max(10px,env(safe-area-inset-left));
     bottom: 8px;
   }
 
   .table-talk--game {
     inset-inline-start: max(75px,calc(env(safe-area-inset-left) + 65px));
     bottom: calc(var(--game-hand-dock-size) + 8px);
+  }
+
+  .table-talk--game .table-talk__trigger {
+    width: clamp(96px,32vw,120px);
+    min-width: 0;
+  }
+
+  .game-v2-lead {
+    right: auto;
+    left: auto;
+    inset-inline-end: max(8px,env(safe-area-inset-right));
+    bottom: max(8px,env(safe-area-inset-bottom));
+    max-width: calc(100% - 99px - clamp(96px,32vw,120px));
+    transform: none;
+  }
+
+  .game-v2-lead b {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  [dir='rtl'] .game-v2-log-toggle {
+    inset-inline-start: max(10px,env(safe-area-inset-right));
+  }
+
+  [dir='rtl'] .table-talk--game {
+    inset-inline-start: max(75px,calc(env(safe-area-inset-right) + 65px));
+  }
+
+  [dir='rtl'] .game-v2-lead {
+    inset-inline-end: max(8px,env(safe-area-inset-left));
   }
 
   .game-v2-waiting-strip > div {

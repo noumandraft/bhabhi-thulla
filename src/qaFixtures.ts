@@ -15,6 +15,10 @@ const cards: Card[] = [
 function base(): ClientRoomView {
   return {
     protocolVersion: PROTOCOL_VERSION,
+    revision: 1,
+    serverNow: Date.now(),
+    mode: 'online',
+    partyBoardConnected: false,
     code: 'QA123', status: 'playing', players: players.map((player) => ({ ...player })), yourPlayerId: 'p1', canStart: false, startBlockReason: 'Match in progress.', minPlayers: 3, maxPlayers: 8,
     settings: { turnSeconds: 35, reconnectGraceSeconds: 60, allowBots: true, reactionsEnabled: true, tutorialHints: true, chatMode: 'text' },
     session: { roundNumber: 3, scores: [

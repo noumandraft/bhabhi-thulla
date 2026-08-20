@@ -15,7 +15,9 @@ export type Rank = (typeof RANKS)[number]
 export type TurnSeconds = (typeof TURN_SECONDS)[number]
 export type Reaction = (typeof REACTIONS)[number]
 export type ChatMode = (typeof CHAT_MODES)[number]
-export type ServerCapability = 'chat-v1'
+export type RoomMode = 'online' | 'party'
+export type PartyAvailability = 'off' | 'beta' | 'public'
+export type ServerCapability = 'chat-v1' | 'party-v1'
 export type GamePhase = 'turn' | 'resolving' | 'waiting_for_reconnect'
 
 export interface Card {
@@ -115,6 +117,10 @@ export interface ChatHistory {
 
 export interface RoomView {
   protocolVersion: typeof PROTOCOL_VERSION
+  revision: number
+  serverNow: number
+  mode: RoomMode
+  partyBoardConnected: boolean
   code: string
   status: 'lobby' | 'playing' | 'finished'
   players: PlayerView[]
@@ -154,6 +160,82 @@ export interface RoomCredentials {
   token: string
 }
 
+export interface PartyBoardCreateRequest {
+  requestId: string
+  boardToken: string
+}
+
+export interface PartyBoardCredentials {
+  code: string
+  boardToken: string
+}
+
+export interface PartyBoardPlayerView {
+  id: string
+  name: string
+  cardCount: number
+  connected: boolean
+  escaped: boolean
+  isHost: boolean
+  ready: boolean
+  isBot: boolean
+  rematchReady: boolean
+  waitingForNextRound: boolean
+  joinedInRound: number
+  reconnecting: boolean
+  reconnectEndsAt: number | null
+}
+
+export interface PartyBoardActivityView {
+  id: string
+  text: string
+  tone: ActivityItem['tone']
+  kind?: ActivityItem['kind']
+  data?: {
+    playerId?: string
+    targetId?: string
+    winnerId?: string
+    thullaPlayerId?: string
+    openerId?: string
+    loserId?: string
+    cardCount?: number
+    joinedInRound?: number
+  }
+}
+
+export interface PartyBoardGameView {
+  phase: GamePhase
+  trick: TrickCardView[]
+  resolvedTrick: ResolvedTrickView | null
+  resolutionEndsAt: number | null
+  pendingTurnId: string | null
+  leadSuit: Suit | null
+  currentTurnId: string | null
+  leaderId: string | null
+  firstTrick: boolean
+  wasteCount: number
+  loserId: string | null
+  turnEndsAt: number | null
+  reconnectPlayerId: string | null
+  reconnectEndsAt: number | null
+  activity: PartyBoardActivityView[]
+}
+
+export interface PartyBoardView {
+  protocolVersion: typeof PROTOCOL_VERSION
+  revision: number
+  serverNow: number
+  mode: 'party'
+  code: string
+  status: 'lobby' | 'playing' | 'finished'
+  minPlayers: number
+  maxPlayers: number
+  settings: RoomSettings
+  session: SessionView
+  players: PartyBoardPlayerView[]
+  game: PartyBoardGameView | null
+}
+
 export interface RoomLeaveResult {
   code: string
   roomDeleted: boolean
@@ -163,6 +245,8 @@ export interface RoomLeaveResult {
 export interface ServerHello {
   protocolVersion: typeof PROTOCOL_VERSION
   capabilities?: ServerCapability[]
+  partyMode?: PartyAvailability
+  serverNow?: number
 }
 
 export interface Ack<T = undefined> {

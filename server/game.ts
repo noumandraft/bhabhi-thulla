@@ -18,11 +18,16 @@ import {
   type ChatMessage,
   type ChatMode,
   type GamePhase,
+  type PartyBoardActivityView,
+  type PartyBoardCreateRequest,
+  type PartyBoardCredentials,
+  type PartyBoardView,
   type Reaction,
   type ReactionEvent,
   type ResolvedTrickView,
   type RoomCredentials,
   type RoomLeaveResult,
+  type RoomMode,
   type RoomSettings,
   type RoomView,
   type SessionScore,
@@ -34,9 +39,13 @@ const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const ROOM_TTL_MS = 6 * 60 * 60 * 1000
 const CHAT_DEDUPE_TTL_MS = 10 * 60 * 1000
 const CHAT_DEDUPE_LIMIT = 256
+const PARTY_CREATE_RECOVERY_MS = 10 * 60 * 1000
 const CLIENT_MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const PARTY_BOARD_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/
+const SHA256_HASH_PATTERN = /^[0-9a-f]{64}$/
 const CHAT_CONTROL_CHARACTER_PATTERN = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u
 const CHAT_BIDI_CONTROL_PATTERN = /[\u202a-\u202e\u2066-\u2069]/u
+const SAVED_BOARD_ERROR = 'That saved board is no longer available.'
 
 export interface Player {
   id: string
@@ -55,6 +64,14 @@ export interface Player {
   reconnectGraceUsed: boolean
   /** Internal rollout bridge. Never include this capability flag in RoomView. */
   usesReadyProtocol: boolean
+}
+
+export interface PartyBoard {
+  tokenHash: string
+  creationRequestHash: string | null
+  creationRequestExpiresAt: number | null
+  socketId: string | null
+  connected: boolean
 }
 
 export interface TrickCard {
@@ -97,6 +114,9 @@ export interface GameState {
 
 export interface Room {
   code: string
+  revision: number
+  mode: RoomMode
+  partyBoard: PartyBoard | null
   status: 'lobby' | 'playing' | 'finished'
   players: Player[]
   game: GameState | null
@@ -199,6 +219,34 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
 }
 
+function hashesMatch(actualHash: string, expectedHash: string): boolean {
+  if (!SHA256_HASH_PATTERN.test(actualHash) || !SHA256_HASH_PATTERN.test(expectedHash)) return false
+  return timingSafeEqual(Buffer.from(actualHash, 'hex'), Buffer.from(expectedHash, 'hex'))
+}
+
+function cleanPartyBoardToken(value: unknown): string {
+  const token = typeof value === 'string' ? value : ''
+  if (!PARTY_BOARD_TOKEN_PATTERN.test(token)) throw new Error(SAVED_BOARD_ERROR)
+  return token
+}
+
+function cleanPartyBoardCreateRequest(request: PartyBoardCreateRequest): PartyBoardCreateRequest {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new Error('Create a new Party board request and try again.')
+  }
+  const requestId = typeof request.requestId === 'string' ? request.requestId.trim().toLowerCase() : ''
+  if (!CLIENT_MESSAGE_ID_PATTERN.test(requestId)) {
+    throw new Error('Create a new Party board request and try again.')
+  }
+  let boardToken: string
+  try {
+    boardToken = cleanPartyBoardToken(request.boardToken)
+  } catch {
+    throw new Error('Create a new Party board request and try again.')
+  }
+  return { requestId, boardToken }
+}
+
 function hashChatText(text: string): string {
   return createHash('sha256').update(text).digest('hex')
 }
@@ -219,9 +267,7 @@ function pruneChatDedupe(chat: ChatRoomState, now: number): void {
 }
 
 function tokenMatches(token: string, expectedHash: string): boolean {
-  const actual = Buffer.from(hashToken(token), 'hex')
-  const expected = Buffer.from(expectedHash, 'hex')
-  return actual.length === expected.length && timingSafeEqual(actual, expected)
+  return hashesMatch(hashToken(token), expectedHash)
 }
 
 function activePlayers(room: Room): Player[] {
@@ -268,6 +314,26 @@ function addActivity(
   game.activity = game.activity.slice(0, 16)
 }
 
+function boardActivity(item: ActivityItem): PartyBoardActivityView {
+  const view: PartyBoardActivityView = {
+    id: item.id,
+    text: item.text,
+    tone: item.tone,
+  }
+  if (item.kind) view.kind = item.kind
+  if (!item.data) return view
+
+  const data: NonNullable<PartyBoardActivityView['data']> = {}
+  for (const key of ['playerId', 'targetId', 'winnerId', 'thullaPlayerId', 'openerId', 'loserId'] as const) {
+    if (typeof item.data[key] === 'string') data[key] = item.data[key]
+  }
+  for (const key of ['cardCount', 'joinedInRound'] as const) {
+    if (typeof item.data[key] === 'number' && Number.isFinite(item.data[key])) data[key] = item.data[key]
+  }
+  if (Object.keys(data).length) view.data = data
+  return view
+}
+
 function defaultSettings(): RoomSettings {
   return {
     turnSeconds: 35,
@@ -296,6 +362,7 @@ export class GameManager {
   readonly rooms = new Map<string, Room>()
   private readonly timers = new Map<string, NodeJS.Timeout>()
   private readonly chatRooms = new Map<string, ChatRoomState>()
+  private readonly partyCreationRequests = new Map<string, string>()
   private publisher: (room: Room) => void = () => undefined
   private readonly persistence: RoomPersistence
 
@@ -308,6 +375,31 @@ export class GameManager {
     const now = Date.now()
     for (const restored of await this.persistence.loadAll()) {
       if (!restored?.code || restored.updatedAt < now - ROOM_TTL_MS) continue
+      restored.revision = Number.isSafeInteger(restored.revision) && restored.revision >= 0
+        ? restored.revision
+        : 0
+      restored.mode = restored.mode === 'party' ? 'party' : 'online'
+      if (restored.mode === 'party') {
+        if (!restored.partyBoard || !SHA256_HASH_PATTERN.test(restored.partyBoard.tokenHash)) continue
+        const requestActive = Boolean(
+          restored.partyBoard.creationRequestHash
+          && SHA256_HASH_PATTERN.test(restored.partyBoard.creationRequestHash)
+          && Number.isFinite(restored.partyBoard.creationRequestExpiresAt)
+          && restored.partyBoard.creationRequestExpiresAt! > now,
+        )
+        restored.partyBoard = {
+          tokenHash: restored.partyBoard.tokenHash,
+          creationRequestHash: requestActive ? restored.partyBoard.creationRequestHash : null,
+          creationRequestExpiresAt: requestActive ? restored.partyBoard.creationRequestExpiresAt : null,
+          socketId: null,
+          connected: false,
+        }
+        if (restored.partyBoard.creationRequestHash) {
+          this.partyCreationRequests.set(restored.partyBoard.creationRequestHash, restored.code)
+        }
+      } else {
+        restored.partyBoard = null
+      }
       restored.settings = { ...defaultSettings(), ...restored.settings, reconnectGraceSeconds: 60 }
       restored.session ??= { roundNumber: 0, scores: [] }
       restored.players = restored.players.map((player) => ({
@@ -347,8 +439,26 @@ export class GameManager {
     ))
   }
 
+  socketHasPartyBoard(socketId: string): boolean {
+    return Boolean(socketId && [...this.rooms.values()].some((room) =>
+      room.partyBoard?.socketId === socketId && room.partyBoard.connected,
+    ))
+  }
+
+  socketOwnsPartyBoard(roomCode: unknown, socketId: string): boolean {
+    if (typeof roomCode !== 'string' || !socketId) return false
+    const room = this.rooms.get(roomCode.trim().toUpperCase())
+    return Boolean(
+      room?.mode === 'party'
+      && room.partyBoard?.connected
+      && room.partyBoard.socketId === socketId,
+    )
+  }
+
   private ensureSocketHasNoSeat(socketId: string): void {
-    if (this.socketHasSeat(socketId)) throw new Error('This connection is already seated in a room. Leave it before joining another.')
+    if (this.socketHasSeat(socketId) || this.socketHasPartyBoard(socketId)) {
+      throw new Error('This connection is already seated in a room. Leave it before joining another.')
+    }
   }
 
   async close(): Promise<void> {
@@ -423,6 +533,9 @@ export class GameManager {
     const { player, token } = this.makePlayer(name, socketId, true, false, usesReadyProtocol)
     const room: Room = {
       code: this.makeRoomCode(),
+      revision: 0,
+      mode: 'online',
+      partyBoard: null,
       status: 'lobby',
       players: [player],
       game: null,
@@ -433,6 +546,115 @@ export class GameManager {
     this.rooms.set(room.code, room)
     this.changed(room)
     return { room, credentials: { code: room.code, playerId: player.id, token } }
+  }
+
+  createPartyRoom(
+    requestValue: PartyBoardCreateRequest,
+    socketId: string,
+    allowFresh = true,
+  ): { room: Room; credentials: PartyBoardCredentials; replacedSocketId: string | null } {
+    const request = cleanPartyBoardCreateRequest(requestValue)
+    const requestHash = hashToken(request.requestId)
+    const boardTokenHash = hashToken(request.boardToken)
+    const retryCode = this.partyCreationRequests.get(requestHash)
+
+    if (retryCode) {
+      const retryRoom = this.rooms.get(retryCode)
+      const board = retryRoom?.mode === 'party' ? retryRoom.partyBoard : null
+      const requestMatches = Boolean(
+        board?.creationRequestHash
+        && hashesMatch(requestHash, board.creationRequestHash)
+        && board.creationRequestExpiresAt !== null
+        && board.creationRequestExpiresAt > Date.now(),
+      )
+      if (!retryRoom || !board || !requestMatches || !hashesMatch(boardTokenHash, board.tokenHash)) {
+        if (board && board.creationRequestExpiresAt !== null && board.creationRequestExpiresAt <= Date.now()) {
+          board.creationRequestHash = null
+          board.creationRequestExpiresAt = null
+        }
+        throw new Error(SAVED_BOARD_ERROR)
+      }
+
+      const replacedSocketId = board.connected && board.socketId !== socketId ? board.socketId : null
+      if (board.socketId !== socketId || !board.connected) {
+        this.ensureSocketHasNoSeat(socketId)
+        board.socketId = socketId
+        board.connected = true
+        this.changed(retryRoom, false)
+      }
+      return {
+        room: retryRoom,
+        credentials: { code: retryRoom.code, boardToken: request.boardToken },
+        replacedSocketId,
+      }
+    }
+
+    if (!allowFresh) throw new Error('Party Mode is not available right now.')
+    this.ensureSocketHasNoSeat(socketId)
+    const room: Room = {
+      code: this.makeRoomCode(),
+      revision: 0,
+      mode: 'party',
+      partyBoard: {
+        tokenHash: boardTokenHash,
+        creationRequestHash: requestHash,
+        creationRequestExpiresAt: Date.now() + PARTY_CREATE_RECOVERY_MS,
+        socketId,
+        connected: true,
+      },
+      status: 'lobby',
+      players: [],
+      game: null,
+      settings: defaultSettings(),
+      session: { roundNumber: 0, scores: [] },
+      updatedAt: Date.now(),
+    }
+    this.rooms.set(room.code, room)
+    this.partyCreationRequests.set(requestHash, room.code)
+    this.changed(room)
+    return {
+      room,
+      credentials: { code: room.code, boardToken: request.boardToken },
+      replacedSocketId: null,
+    }
+  }
+
+  reconnectPartyBoard(
+    codeValue: unknown,
+    tokenValue: unknown,
+    socketId: string,
+  ): { room: Room; credentials: PartyBoardCredentials; replacedSocketId: string | null } {
+    this.ensureSocketHasNoSeat(socketId)
+    let code: string
+    let boardToken: string
+    try {
+      code = cleanCode(codeValue)
+      boardToken = cleanPartyBoardToken(tokenValue)
+    } catch {
+      throw new Error(SAVED_BOARD_ERROR)
+    }
+    const room = this.rooms.get(code)
+    const board = room?.mode === 'party' ? room.partyBoard : null
+    if (!room || !board || !tokenMatches(boardToken, board.tokenHash)) throw new Error(SAVED_BOARD_ERROR)
+    const replacedSocketId = board.connected && board.socketId !== socketId ? board.socketId : null
+    board.socketId = socketId
+    board.connected = true
+    this.changed(room, false)
+    return { room, credentials: { code, boardToken }, replacedSocketId }
+  }
+
+  disconnectPartyBoard(socketId: string): Room[] {
+    const changedRooms: Room[] = []
+    if (!socketId) return changedRooms
+    for (const room of this.rooms.values()) {
+      const board = room.partyBoard
+      if (room.mode !== 'party' || !board || board.socketId !== socketId) continue
+      board.socketId = null
+      board.connected = false
+      this.changed(room, false)
+      changedRooms.push(room)
+    }
+    return changedRooms
   }
 
   joinRoom(codeValue: unknown, name: unknown, socketId: string, usesReadyProtocol = true): { room: Room; credentials: RoomCredentials } {
@@ -540,8 +762,12 @@ export class GameManager {
       }
       ensureConnectedHost(room)
       if (!room.players.some((candidate) => !candidate.isBot)) {
-        result.roomDeleted = true
-        this.deleteRoom(room)
+        if (room.mode === 'party') {
+          this.changed(room)
+        } else {
+          result.roomDeleted = true
+          this.deleteRoom(room)
+        }
       } else {
         this.changed(room)
       }
@@ -1191,6 +1417,101 @@ export class GameManager {
     return [...cards].sort((a, b) => rankValue(a.rank) - rankValue(b.rank) || SUITS.indexOf(a.suit) - SUITS.indexOf(b.suit))[0]
   }
 
+  boardView(room: Room): PartyBoardView {
+    if (room.mode !== 'party' || !room.partyBoard) throw new Error('Party board is not available for this room.')
+    const game = room.game
+    return {
+      protocolVersion: PROTOCOL_VERSION,
+      revision: room.revision,
+      serverNow: Date.now(),
+      mode: 'party',
+      code: room.code,
+      status: room.status,
+      minPlayers: 3,
+      maxPlayers: 8,
+      settings: {
+        turnSeconds: room.settings.turnSeconds,
+        reconnectGraceSeconds: 60,
+        allowBots: room.settings.allowBots,
+        reactionsEnabled: room.settings.reactionsEnabled,
+        tutorialHints: room.settings.tutorialHints,
+        chatMode: room.settings.chatMode,
+      },
+      session: {
+        roundNumber: room.session.roundNumber,
+        scores: room.session.scores.map((score) => ({
+          playerId: score.playerId,
+          playerName: score.playerName,
+          roundsPlayed: score.roundsPlayed,
+          escapes: score.escapes,
+          firstEscapes: score.firstEscapes,
+          bhabhiCount: score.bhabhiCount,
+          currentBhabhiStreak: score.currentBhabhiStreak,
+          bestBhabhiStreak: score.bestBhabhiStreak,
+        })),
+      },
+      players: room.players.map((player) => ({
+        id: player.id,
+        name: player.name,
+        cardCount: player.waitingForNextRound ? 0 : player.hand.length,
+        connected: player.connected,
+        escaped: player.escaped,
+        isHost: player.isHost,
+        ready: player.ready,
+        isBot: player.isBot,
+        rematchReady: player.rematchReady,
+        waitingForNextRound: player.waitingForNextRound,
+        joinedInRound: player.joinedInRound,
+        reconnecting: game?.phase === 'waiting_for_reconnect' && game.reconnectPlayerId === player.id,
+        reconnectEndsAt: game?.phase === 'waiting_for_reconnect' && game.reconnectPlayerId === player.id
+          ? game.reconnectEndsAt
+          : null,
+      })),
+      game: game
+        ? {
+            phase: game.phase,
+            trick: game.trick.map((entry) => ({
+              playerId: entry.playerId,
+              playerName: room.players.find((player) => player.id === entry.playerId)?.name ?? 'Player',
+              card: {
+                id: entry.card.id,
+                suit: entry.card.suit,
+                rank: entry.card.rank,
+              },
+            })),
+            resolvedTrick: game.resolvedTrick
+              ? {
+                  kind: game.resolvedTrick.kind,
+                  winnerId: game.resolvedTrick.winnerId,
+                  lastPlayerId: game.resolvedTrick.lastPlayerId,
+                  cards: game.resolvedTrick.cards.map((entry) => ({
+                    playerId: entry.playerId,
+                    playerName: room.players.find((player) => player.id === entry.playerId)?.name ?? 'Player',
+                    card: {
+                      id: entry.card.id,
+                      suit: entry.card.suit,
+                      rank: entry.card.rank,
+                    },
+                  })),
+                }
+              : null,
+            resolutionEndsAt: game.resolutionEndsAt,
+            pendingTurnId: game.pendingTurnId,
+            leadSuit: game.leadSuit,
+            currentTurnId: game.currentTurnId,
+            leaderId: game.leaderId,
+            firstTrick: game.firstTrick,
+            wasteCount: game.waste.length,
+            loserId: game.loserId,
+            turnEndsAt: game.turnEndsAt,
+            reconnectPlayerId: game.reconnectPlayerId,
+            reconnectEndsAt: game.reconnectEndsAt,
+            activity: game.activity.map(boardActivity),
+          }
+        : null,
+    }
+  }
+
   view(room: Room, viewerId: string): RoomView {
     const viewer = this.requirePlayer(room, viewerId)
     const game = room.game
@@ -1209,6 +1530,10 @@ export class GameManager {
     const startBlockReason = this.startBlockReason(room)
     return {
       protocolVersion: PROTOCOL_VERSION,
+      revision: room.revision,
+      serverNow: Date.now(),
+      mode: room.mode,
+      partyBoardConnected: room.mode === 'party' && Boolean(room.partyBoard?.connected),
       code: room.code,
       status: room.status,
       yourPlayerId: viewerId,
@@ -1273,17 +1598,25 @@ export class GameManager {
     }
   }
 
-  removeStaleRooms(): void {
+  removeStaleRooms(): Array<{ code: string; socketId: string }> {
+    const expiredBoardBindings: Array<{ code: string; socketId: string }> = []
     const cutoff = Date.now() - ROOM_TTL_MS
     for (const room of this.rooms.values()) {
       if (room.updatedAt < cutoff && room.players.every((player) => player.isBot || !player.connected)) {
+        if (room.mode === 'party' && room.partyBoard?.connected && room.partyBoard.socketId) {
+          expiredBoardBindings.push({ code: room.code, socketId: room.partyBoard.socketId })
+        }
         this.deleteRoom(room)
       }
     }
+    return expiredBoardBindings
   }
 
   private startBlockReason(room: Room): string | null {
     if (room.status === 'playing') return 'The match is already in progress.'
+    if (!room.players.some((player) => !player.isBot && player.connected)) {
+      return 'At least one connected human player is required.'
+    }
     const participants = room.players.filter((player) => player.isBot || player.connected)
     if (participants.length < 3) return 'At least 3 connected players are required.'
     if (room.status === 'lobby') {
@@ -1306,8 +1639,11 @@ export class GameManager {
   private deleteRoom(room: Room): void {
     this.clearTimer(room.code)
     this.chatRooms.delete(room.code)
+    for (const [requestHash, code] of this.partyCreationRequests) {
+      if (code === room.code) this.partyCreationRequests.delete(requestHash)
+    }
     this.rooms.delete(room.code)
-    void this.persistence.delete(room.code).catch((error) => console.error('room_store_delete_failed', { code: room.code, error: String(error) }))
+    void this.persistence.delete(room.code).catch(() => console.error('room_store_delete_failed', { category: 'persistence' }))
   }
 
   private requirePlayer(room: Room, playerId: unknown): Player {
@@ -1323,11 +1659,12 @@ export class GameManager {
     return player
   }
 
-  private changed(room: Room): void {
-    room.updatedAt = Date.now()
+  private changed(room: Room, touchUpdatedAt = true): void {
+    room.revision = (Number.isSafeInteger(room.revision) && room.revision >= 0 ? room.revision : 0) + 1
+    if (touchUpdatedAt) room.updatedAt = Date.now()
     this.scheduleRoom(room)
     this.publisher(room)
-    void this.persistence.save(room).catch((error) => console.error('room_store_save_failed', { code: room.code, error: String(error) }))
+    void this.persistence.save(room).catch(() => console.error('room_store_save_failed', { category: 'persistence' }))
   }
 
   private clearTimer(code: string): void {

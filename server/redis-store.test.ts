@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GameManager, type PersistenceStatus, type Room, type RoomPersistence } from './game.js'
 
@@ -126,6 +127,79 @@ describe('Redis room persistence contract', () => {
     expect(readerClient.quit).toHaveBeenCalledOnce()
   })
 
+  it('round-trips Party verifier state while keeping board presence and raw credentials out of Redis', async () => {
+    const rawBoardToken = 'A'.repeat(43)
+    const rawRequestId = '00000000-0000-4000-8000-000000000001'
+    const source = new GameManager()
+    const created = source.createRoom('Party Host', 'private-player-socket')
+    const partyRoom = created.room as Room & {
+      revision: number
+      mode: 'party'
+      partyBoard: {
+        tokenHash: string
+        creationRequestHash: string | null
+        creationRequestExpiresAt: number | null
+        socketId: string | null
+        connected: boolean
+        boardToken?: string
+        requestId?: string
+      }
+    }
+    partyRoom.revision = 29
+    partyRoom.mode = 'party'
+    partyRoom.partyBoard = {
+      tokenHash: createHash('sha256').update(rawBoardToken).digest('hex'),
+      creationRequestHash: createHash('sha256').update(rawRequestId).digest('hex'),
+      creationRequestExpiresAt: Date.now() + 10 * 60 * 1000,
+      socketId: 'private-board-socket',
+      connected: true,
+      boardToken: rawBoardToken,
+      requestId: rawRequestId,
+    }
+
+    const backend = new Map<string, string>()
+    const writerClient = new FakeRedisClient(backend)
+    const readerClient = new FakeRedisClient(backend)
+    createClientMock.mockReturnValueOnce(writerClient).mockReturnValueOnce(readerClient)
+
+    const prefix = 'party-test:room:'
+    const writer = new RedisRoomStore('redis://local-test', prefix, true)
+    await writer.initialize()
+    await writer.save(partyRoom)
+
+    const key = `${prefix}${partyRoom.code}`
+    expect(writerClient.set).toHaveBeenCalledWith(key, expect.any(String), { EX: 21_600 })
+    const encoded = backend.get(key)!
+    const stored = JSON.parse(encoded)
+    expect(stored).toMatchObject({ mode: 'party', revision: 29 })
+    expect(stored.partyBoard).toEqual({
+      tokenHash: partyRoom.partyBoard.tokenHash,
+      creationRequestHash: partyRoom.partyBoard.creationRequestHash,
+      creationRequestExpiresAt: partyRoom.partyBoard.creationRequestExpiresAt,
+    })
+    expect(encoded).not.toContain('private-player-socket')
+    expect(encoded).not.toContain('private-board-socket')
+    expect(encoded).not.toContain(rawBoardToken)
+    expect(encoded).not.toContain(rawRequestId)
+
+    const reader = new RedisRoomStore('redis://local-test', prefix, true)
+    const restoredManager = new GameManager(reader)
+    await restoredManager.initialize()
+    const restored = restoredManager.rooms.get(partyRoom.code)!
+    expect(restored).toMatchObject({ mode: 'party', revision: 29 })
+    expect(restored.partyBoard).toMatchObject({
+      tokenHash: partyRoom.partyBoard.tokenHash,
+      connected: false,
+      socketId: null,
+    })
+
+    const rebound = restoredManager.reconnectPartyBoard(partyRoom.code, rawBoardToken, 'restored-board-socket')
+    expect(rebound.room.partyBoard).toMatchObject({ connected: true, socketId: 'restored-board-socket' })
+
+    await writer.close()
+    await restoredManager.close()
+  })
+
   it('loads only valid rooms under its prefix and ignores malformed Redis values', async () => {
     const source = new GameManager()
     const created = source.createRoom('Valid Host', 'socket-valid')
@@ -145,6 +219,67 @@ describe('Redis room persistence contract', () => {
     expect(client.scanIterator).toHaveBeenCalledWith({ MATCH: `${prefix}*`, COUNT: 100 })
     expect(client.get).not.toHaveBeenCalledWith(`other:${created.room.code}`)
     expect(warning).toHaveBeenCalledTimes(2)
+  })
+
+  it('sanitizes legacy and Party snapshots and ignores a Party room with an invalid board verifier', async () => {
+    const source = new GameManager()
+    const online = source.createRoom('Legacy Host', 'legacy-socket').room
+    const legacy = JSON.parse(JSON.stringify(persistenceSnapshot(online))) as Record<string, unknown>
+    delete legacy.mode
+    delete legacy.revision
+    delete legacy.partyBoard
+
+    const party = JSON.parse(JSON.stringify(persistenceSnapshot(online))) as Record<string, unknown>
+    party.code = 'PARTY'
+    party.mode = 'party'
+    party.revision = 8
+    party.partyBoard = {
+      tokenHash: 'e'.repeat(64),
+      creationRequestHash: 'not-a-sha256-hash',
+      creationRequestExpiresAt: Date.now() + 60_000,
+      socketId: 'must-be-dropped',
+      connected: true,
+      boardToken: 'must-also-be-dropped',
+    }
+    party.suspended = true
+    party.chat = { messages: ['private'] }
+
+    const corruptParty = {
+      ...party,
+      code: 'BADBD',
+      partyBoard: { tokenHash: 'too-short' },
+    }
+    const prefix = 'sanitized:rooms:'
+    const backend = new Map<string, string>([
+      [`${prefix}${online.code}`, JSON.stringify(legacy)],
+      [`${prefix}PARTY`, JSON.stringify(party)],
+      [`${prefix}BADBD`, JSON.stringify(corruptParty)],
+    ])
+    const client = new FakeRedisClient(backend)
+    createClientMock.mockReturnValue(client)
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const store = new RedisRoomStore('redis://local-test', prefix)
+
+    const loaded = await store.loadAll()
+    expect(loaded).toHaveLength(2)
+    expect(loaded.find((room) => room.code === online.code)).toMatchObject({
+      mode: 'online', revision: 0, partyBoard: null,
+    })
+    const loadedParty = loaded.find((room) => room.code === 'PARTY')!
+    expect(loadedParty).toMatchObject({ mode: 'party', revision: 8 })
+    expect(loadedParty.partyBoard).toEqual({
+      tokenHash: 'e'.repeat(64),
+      creationRequestHash: null,
+      creationRequestExpiresAt: null,
+    })
+    expect(loadedParty).not.toHaveProperty('suspended')
+    expect(loadedParty).not.toHaveProperty('chat')
+    expect(loadedParty.partyBoard).not.toHaveProperty('socketId')
+    expect(loadedParty.partyBoard).not.toHaveProperty('connected')
+    expect(JSON.stringify(loadedParty)).not.toContain('must-be-dropped')
+    expect(JSON.stringify(loadedParty)).not.toContain('must-also-be-dropped')
+    expect(JSON.stringify(loadedParty)).not.toContain('private')
+    expect(warning).toHaveBeenCalledOnce()
   })
 
   it('uses memory without a Redis URL and honors configured prefix and durability flags', async () => {
@@ -182,7 +317,7 @@ describe('Redis room persistence contract', () => {
     expect(store.status()).toEqual({
       mode: 'redis', durable: true, ready: false, error: 'connection dropped',
     })
-    expect(logged).toHaveBeenCalledWith('redis_error', { error: 'connection dropped' })
+    expect(logged).toHaveBeenCalledWith('redis_error', { category: 'persistence' })
 
     client.isReady = true
     client.emit('ready')
@@ -199,7 +334,7 @@ describe('Redis room persistence contract', () => {
     expect(manager.rooms.get(created.room.code)).toBe(created.room)
     await vi.waitFor(() => expect(logged).toHaveBeenCalledWith(
       'room_store_save_failed',
-      { code: created.room.code, error: 'Error: save unavailable' },
+      { category: 'persistence' },
     ))
 
     expect(manager.leaveRoom(created.room.code, created.credentials.playerId, 'fallback-socket')).toMatchObject({
@@ -208,7 +343,7 @@ describe('Redis room persistence contract', () => {
     expect(manager.rooms.has(created.room.code)).toBe(false)
     await vi.waitFor(() => expect(logged).toHaveBeenCalledWith(
       'room_store_delete_failed',
-      { code: created.room.code, error: 'Error: delete unavailable' },
+      { category: 'persistence' },
     ))
   })
 })

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import http from 'node:http'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
@@ -9,6 +10,9 @@ import {
   type Ack,
   type ChatHistory,
   type ChatMessage,
+  type PartyAvailability,
+  type PartyBoardCredentials,
+  type PartyBoardCreateRequest,
   type ReactionEvent,
   type RoomCredentials,
   type RoomLeaveResult,
@@ -63,6 +67,43 @@ function booleanField(payload: Record<string, unknown>, key: string): boolean {
   return value
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const BOARD_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/
+const ROOM_CODE_PATTERN = /^[A-HJ-NP-Z2-9]{5}$/
+
+function partyAvailabilityFrom(environment: NodeJS.ProcessEnv): PartyAvailability {
+  const value = environment.PARTY_MODE?.trim()
+  return value === 'beta' || value === 'public' ? value : 'off'
+}
+
+function boardCreatePayload(raw: unknown): PartyBoardCreateRequest {
+  const payload = recordPayload(raw, ['requestId', 'boardToken'])
+  const requestId = textField(payload, 'requestId', 64)?.trim() ?? ''
+  const boardToken = textField(payload, 'boardToken', 64)?.trim() ?? ''
+  if (!UUID_PATTERN.test(requestId) || !BOARD_TOKEN_PATTERN.test(boardToken)) {
+    throw new Error('Invalid board request.')
+  }
+  return { requestId: requestId.toLowerCase(), boardToken }
+}
+
+function boardReconnectPayload(raw: unknown): { code: string; boardToken: string } {
+  const payload = recordPayload(raw, ['code', 'boardToken'])
+  const code = textField(payload, 'code', 12)?.trim().toUpperCase() ?? ''
+  const boardToken = textField(payload, 'boardToken', 64)?.trim() ?? ''
+  if (!ROOM_CODE_PATTERN.test(code) || !BOARD_TOKEN_PATTERN.test(boardToken)) {
+    throw new Error('That saved board is no longer available.')
+  }
+  return { code, boardToken }
+}
+
+function safeErrorCategory(message: string): string {
+  if (/too many|slow down|wait before/i.test(message)) return 'rate_limited'
+  if (/invalid|enter a valid|request fields/i.test(message)) return 'invalid_request'
+  if (/saved (?:seat|board)|reconnect|already (?:seated|connected|bound)/i.test(message)) return 'authorization'
+  if (/not found|no longer exists/i.test(message)) return 'not_found'
+  return 'action_rejected'
+}
+
 function clientIp(socket: Socket): string {
   const forwarded = socket.handshake.headers['x-forwarded-for']
   const firstForwarded = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0]
@@ -85,12 +126,19 @@ export interface GameServer {
   server: http.Server
   io: Server
   manager: GameManager
+  runMaintenance(): void
   listen(port?: number): Promise<number>
   close(): Promise<void>
 }
 
 export async function createGameServer(environment: NodeJS.ProcessEnv = process.env): Promise<GameServer> {
   const allowedOrigins = originsFrom(environment)
+  const partyMode = partyAvailabilityFrom(environment)
+  const buildVersion = environment.RENDER_GIT_COMMIT
+    ?? environment.COMMIT_SHA
+    ?? environment.npm_package_version
+    ?? 'development'
+  const processCorrelationId = randomBytes(8).toString('hex')
   const manager = new GameManager(createRoomPersistence(environment))
   await manager.initialize()
   const limiter = new RateLimiter()
@@ -109,7 +157,7 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
       service: 'bhabhi-thulla-server',
       now: new Date().toISOString(),
       protocolVersion: PROTOCOL_VERSION,
-      version: environment.RENDER_GIT_COMMIT ?? environment.COMMIT_SHA ?? environment.npm_package_version ?? 'development',
+      version: buildVersion,
       persistence: { mode: persistence.mode, durable: persistence.durable },
     })
   })
@@ -137,6 +185,9 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
     for (const player of room.players) {
       if (player.connected && player.socketId) io.to(player.socketId).emit('room:state', manager.view(room, player.id))
     }
+    if (room.mode === 'party' && room.partyBoard?.connected && room.partyBoard.socketId) {
+      io.to(room.partyBoard.socketId).emit('party:board:state', manager.boardView(room))
+    }
   }
 
   function broadcastChat(room: Room, message: ChatMessage): void {
@@ -152,6 +203,9 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
       if (!player.isBot && player.connected && player.socketId) {
         io.to(player.socketId).emit('room:reaction', reaction)
       }
+    }
+    if (room.mode === 'party' && room.partyBoard?.connected && room.partyBoard.socketId) {
+      io.to(room.partyBoard.socketId).emit('room:reaction', reaction)
     }
   }
 
@@ -173,9 +227,9 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
       const message = error instanceof Error ? error.message : 'Something went wrong.'
       console.warn('socket_action_rejected', {
         event,
-        roomCode: typeof socket.data.roomCode === 'string' ? socket.data.roomCode : null,
-        ip: clientIp(socket),
-        error: message,
+        category: safeErrorCategory(message),
+        version: buildVersion,
+        correlationId: processCorrelationId,
       })
       respond?.({ ok: false, error: message })
       return undefined
@@ -183,14 +237,54 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
   }
 
   function requireSeat(socket: Socket): { roomCode: string; playerId: string } {
+    if (socket.data.connectionRole !== 'player') throw new Error('Reconnect to your seat and try again.')
     const roomCode = typeof socket.data.roomCode === 'string' ? socket.data.roomCode : ''
     const playerId = typeof socket.data.playerId === 'string' ? socket.data.playerId : ''
     if (!manager.socketOwnsSeat(roomCode, playerId, socket.id)) throw new Error('Reconnect to your seat and try again.')
     return { roomCode, playerId }
   }
 
-  function requireUnseated(socket: Socket): void {
-    if (manager.socketHasSeat(socket.id)) throw new Error('This connection is already seated in a room. Leave it before joining another.')
+  function requireUnbound(socket: Socket): void {
+    if (socket.data.connectionRole === 'player' || manager.socketHasSeat(socket.id)) {
+      throw new Error('This connection is already seated in a room. Leave it before joining another.')
+    }
+    if (socket.data.connectionRole) {
+      throw new Error('This connection is already connected to a room. Leave it before joining another.')
+    }
+  }
+
+  function bindPlayer(socket: Socket, roomCode: string, playerId: string): void {
+    socket.data.connectionRole = 'player'
+    socket.data.roomCode = roomCode
+    socket.data.playerId = playerId
+    void socket.join(roomCode)
+  }
+
+  function bindBoard(socket: Socket, roomCode: string): void {
+    socket.data.connectionRole = 'board'
+    socket.data.roomCode = roomCode
+    delete socket.data.playerId
+    void socket.join(roomCode)
+  }
+
+  function clearBinding(socket: Socket, roomCode?: string): void {
+    const code = roomCode ?? (typeof socket.data.roomCode === 'string' ? socket.data.roomCode : undefined)
+    delete socket.data.connectionRole
+    delete socket.data.roomCode
+    delete socket.data.playerId
+    if (code) void socket.leave(code)
+  }
+
+  function replaceBoardSocket(replacedSocketId: string | null, code: string): void {
+    if (!replacedSocketId) return
+    const replacedSocket = io.sockets.sockets.get(replacedSocketId)
+    if (!replacedSocket) return
+    clearBinding(replacedSocket, code)
+    replacedSocket.emit('party:board:replaced', { code })
+    console.info('party_board_replaced', {
+      version: buildVersion,
+      correlationId: processCorrelationId,
+    })
   }
 
   io.on('connection', (socket) => {
@@ -198,7 +292,9 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
     const usesReadyProtocol = socket.handshake.auth?.protocolVersion === PROTOCOL_VERSION
     socket.emit('server:hello', {
       protocolVersion: PROTOCOL_VERSION,
-      capabilities: ['chat-v1'],
+      capabilities: ['chat-v1', 'party-v1'],
+      partyMode,
+      serverNow: Date.now(),
     } satisfies ServerHello)
     const connectionCount = (connectionsByIp.get(ip) ?? 0) + 1
     connectionsByIp.set(ip, connectionCount)
@@ -211,13 +307,11 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
 
     socket.on('room:create', (raw: unknown, ack?: (value: Ack<RoomCredentials>) => void) => {
       safeAck(socket, 'room:create', ack, () => {
-        requireUnseated(socket)
+        requireUnbound(socket)
         if (!limiter.consume(`ip:${ip}:create`, 5, 10 * 60_000)) throw new Error('Too many rooms created. Please try again later.')
         const payload = recordPayload(raw, ['name'])
         const result = manager.createRoom(textField(payload, 'name', 80), socket.id, usesReadyProtocol)
-        socket.data.roomCode = result.room.code
-        socket.data.playerId = result.credentials.playerId
-        void socket.join(result.room.code)
+        bindPlayer(socket, result.room.code, result.credentials.playerId)
         queueMicrotask(() => broadcast(result.room))
         return result.credentials
       })
@@ -225,13 +319,11 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
 
     socket.on('room:join', (raw: unknown, ack?: (value: Ack<RoomCredentials>) => void) => {
       safeAck(socket, 'room:join', ack, () => {
-        requireUnseated(socket)
+        requireUnbound(socket)
         if (!limiter.consume(`ip:${ip}:join`, 30, 10 * 60_000)) throw new Error('Too many join attempts. Please try again later.')
         const payload = recordPayload(raw, ['code', 'name'])
         const result = manager.joinRoom(textField(payload, 'code', 12), textField(payload, 'name', 80), socket.id, usesReadyProtocol)
-        socket.data.roomCode = result.room.code
-        socket.data.playerId = result.credentials.playerId
-        void socket.join(result.room.code)
+        bindPlayer(socket, result.room.code, result.credentials.playerId)
         queueMicrotask(() => broadcast(result.room))
         return result.credentials
       })
@@ -239,7 +331,7 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
 
     socket.on('room:reconnect', (raw: unknown, ack?: (value: Ack<RoomCredentials>) => void) => {
       safeAck(socket, 'room:reconnect', ack, () => {
-        requireUnseated(socket)
+        requireUnbound(socket)
         if (!limiter.consume(`ip:${ip}:reconnect`, 60, 10 * 60_000)) throw new Error('Too many reconnect attempts. Please try again later.')
         const payload = recordPayload(raw, ['code', 'token'])
         const result = manager.reconnectRoom(
@@ -248,10 +340,49 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
           socket.id,
           usesReadyProtocol,
         )
-        socket.data.roomCode = result.room.code
-        socket.data.playerId = result.credentials.playerId
-        void socket.join(result.room.code)
+        bindPlayer(socket, result.room.code, result.credentials.playerId)
         queueMicrotask(() => broadcast(result.room))
+        return result.credentials
+      })
+    })
+
+    socket.on('party:board:create', (raw: unknown, ack?: (value: Ack<PartyBoardCredentials>) => void) => {
+      safeAck(socket, 'party:board:create', ack, () => {
+        const request = boardCreatePayload(raw)
+        const sameBoardRetry = socket.data.connectionRole === 'board'
+          && typeof socket.data.roomCode === 'string'
+          && manager.socketOwnsPartyBoard(socket.data.roomCode, socket.id)
+        if (!sameBoardRetry) requireUnbound(socket)
+        if (!limiter.consume(`ip:${ip}:create`, 5, 10 * 60_000)) {
+          throw new Error('Too many rooms created. Please try again later.')
+        }
+        const result = manager.createPartyRoom(request, socket.id, partyMode !== 'off')
+        replaceBoardSocket(result.replacedSocketId, result.room.code)
+        bindBoard(socket, result.room.code)
+        queueMicrotask(() => broadcast(result.room))
+        console.info('party_board_created', {
+          version: buildVersion,
+          correlationId: processCorrelationId,
+        })
+        return result.credentials
+      })
+    })
+
+    socket.on('party:board:reconnect', (raw: unknown, ack?: (value: Ack<PartyBoardCredentials>) => void) => {
+      safeAck(socket, 'party:board:reconnect', ack, () => {
+        requireUnbound(socket)
+        if (!limiter.consume(`ip:${ip}:reconnect`, 60, 10 * 60_000)) {
+          throw new Error('Too many reconnect attempts. Please try again later.')
+        }
+        const payload = boardReconnectPayload(raw)
+        const result = manager.reconnectPartyBoard(payload.code, payload.boardToken, socket.id)
+        replaceBoardSocket(result.replacedSocketId, result.room.code)
+        bindBoard(socket, result.room.code)
+        queueMicrotask(() => broadcast(result.room))
+        console.info('party_board_reconnected', {
+          version: buildVersion,
+          correlationId: processCorrelationId,
+        })
         return result.credentials
       })
     })
@@ -269,9 +400,7 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
         recordPayload(raw)
         const seat = requireSeat(socket)
         const result = manager.leaveRoom(seat.roomCode, seat.playerId, socket.id)
-        delete socket.data.roomCode
-        delete socket.data.playerId
-        void socket.leave(seat.roomCode)
+        clearBinding(socket, seat.roomCode)
         return result
       })
     })
@@ -295,6 +424,7 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
           if (removedSocket) {
             delete removedSocket.data.roomCode
             delete removedSocket.data.playerId
+            delete removedSocket.data.connectionRole
             void removedSocket.leave(seat.roomCode)
           }
         }
@@ -412,14 +542,34 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
       const current = connectionsByIp.get(ip) ?? 1
       if (current <= 1) connectionsByIp.delete(ip)
       else connectionsByIp.set(ip, current - 1)
-      manager.disconnect(socket.id)
+      if (socket.data.connectionRole === 'board') {
+        manager.disconnectPartyBoard(socket.id)
+        console.info('party_board_disconnected', {
+          version: buildVersion,
+          correlationId: processCorrelationId,
+        })
+      } else {
+        manager.disconnect(socket.id)
+      }
     })
   })
 
-  const maintenanceTimer = setInterval(() => {
-    manager.removeStaleRooms()
+  function runMaintenance(): void {
+    const expiredBoards = manager.removeStaleRooms()
+    for (const expired of expiredBoards) {
+      const boardSocket = io.sockets.sockets.get(expired.socketId)
+      if (!boardSocket) continue
+      clearBinding(boardSocket, expired.code)
+      boardSocket.emit('party:board:expired', { code: expired.code })
+      console.info('party_board_expired', {
+        version: buildVersion,
+        correlationId: processCorrelationId,
+      })
+    }
     limiter.cleanup()
-  }, 30 * 60 * 1000)
+  }
+
+  const maintenanceTimer = setInterval(runMaintenance, 30 * 60 * 1000)
   maintenanceTimer.unref()
 
   return {
@@ -427,6 +577,7 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
     server,
     io,
     manager,
+    runMaintenance,
     listen(port = Number(environment.PORT ?? 3001)): Promise<number> {
       return new Promise((fulfill, reject) => {
         server.once('error', reject)

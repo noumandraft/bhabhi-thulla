@@ -38,6 +38,97 @@ describe('room persistence', () => {
     expect(serialized).toContain('tokenHash')
   })
 
+  it('persists only durable Party board verifiers and strips transient or unknown private data', () => {
+    const manager = new GameManager(new CaptureStore())
+    const created = manager.createRoom('Party Host', 'player-socket-private')
+    const recoveryExpiresAt = Date.now() + 10 * 60 * 1000
+    const partyRoom = created.room as Room & {
+      revision: number
+      mode: 'party'
+      partyBoard: {
+        tokenHash: string
+        creationRequestHash: string | null
+        creationRequestExpiresAt: number | null
+        socketId: string | null
+        connected: boolean
+        boardToken?: string
+        requestId?: string
+      }
+      suspended: boolean
+      chat?: { messages: string[] }
+    }
+    partyRoom.revision = 17
+    partyRoom.mode = 'party'
+    partyRoom.partyBoard = {
+      tokenHash: 'a'.repeat(64),
+      creationRequestHash: 'b'.repeat(64),
+      creationRequestExpiresAt: recoveryExpiresAt,
+      socketId: 'board-socket-private',
+      connected: true,
+      boardToken: 'raw-board-token-must-not-persist',
+      requestId: 'raw-create-request-must-not-persist',
+    }
+    partyRoom.suspended = true
+    partyRoom.chat = { messages: ['private table talk'] }
+
+    const snapshot = persistenceSnapshot(partyRoom)
+    expect(snapshot).toMatchObject({ mode: 'party', revision: 17 })
+    expect(snapshot.partyBoard).toEqual({
+      tokenHash: 'a'.repeat(64),
+      creationRequestHash: 'b'.repeat(64),
+      creationRequestExpiresAt: recoveryExpiresAt,
+    })
+    expect(snapshot.partyBoard).not.toHaveProperty('socketId')
+    expect(snapshot.partyBoard).not.toHaveProperty('connected')
+    expect(snapshot).not.toHaveProperty('suspended')
+    expect(snapshot).not.toHaveProperty('chat')
+
+    const serialized = JSON.stringify(snapshot)
+    expect(serialized).not.toContain('player-socket-private')
+    expect(serialized).not.toContain('board-socket-private')
+    expect(serialized).not.toContain('raw-board-token-must-not-persist')
+    expect(serialized).not.toContain('raw-create-request-must-not-persist')
+    expect(serialized).not.toContain('private table talk')
+    expect(serialized).not.toContain(created.credentials.token)
+  })
+
+  it('drops expired Party create-recovery verifiers as an atomic pair', () => {
+    const manager = new GameManager(new CaptureStore())
+    const created = manager.createRoom('Party Host', 'player-socket')
+    const partyRoom = created.room as Room & {
+      mode: 'party'
+      partyBoard: {
+        tokenHash: string
+        creationRequestHash: string | null
+        creationRequestExpiresAt: number | null
+        socketId: string | null
+        connected: boolean
+      }
+    }
+    partyRoom.mode = 'party'
+    partyRoom.partyBoard = {
+      tokenHash: 'c'.repeat(64),
+      creationRequestHash: 'd'.repeat(64),
+      creationRequestExpiresAt: Date.now(),
+      socketId: null,
+      connected: false,
+    }
+
+    expect(persistenceSnapshot(partyRoom).partyBoard).toEqual({
+      tokenHash: 'c'.repeat(64),
+      creationRequestHash: null,
+      creationRequestExpiresAt: null,
+    })
+
+    partyRoom.partyBoard.creationRequestHash = 'raw-request-id-is-not-a-verifier'
+    partyRoom.partyBoard.creationRequestExpiresAt = Date.now() + 60_000
+    expect(persistenceSnapshot(partyRoom).partyBoard).toEqual({
+      tokenHash: 'c'.repeat(64),
+      creationRequestHash: null,
+      creationRequestExpiresAt: null,
+    })
+  })
+
   it('keeps Table Talk message content outside persisted room snapshots', () => {
     const store = new CaptureStore()
     const manager = new GameManager(store)
@@ -75,6 +166,10 @@ describe('room persistence', () => {
     const created = first.createRoom('Old Player', 'old-socket')
     const restored = JSON.parse(JSON.stringify(persistenceSnapshot(created.room))) as Room
     const oldPlayer = restored.players[0] as typeof restored.players[0] & { usesReadyProtocol?: boolean }
+    const legacy = restored as Room & { revision?: number; mode?: 'online' | 'party'; partyBoard?: unknown }
+    delete legacy.revision
+    delete legacy.mode
+    delete legacy.partyBoard
     delete oldPlayer.usesReadyProtocol
     oldPlayer.ready = false
     oldPlayer.rematchReady = false
@@ -84,6 +179,11 @@ describe('room persistence', () => {
       usesReadyProtocol: false,
       ready: true,
       rematchReady: true,
+    })
+    expect(second.rooms.get(created.room.code)).toMatchObject({
+      revision: 0,
+      mode: 'online',
+      partyBoard: null,
     })
   })
 

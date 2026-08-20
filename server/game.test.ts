@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { RECONNECT_GRACE_MS, TRICK_RESOLUTION_MS, type Card } from '../shared/game.js'
+import {
+  RECONNECT_GRACE_MS,
+  TRICK_RESOLUTION_MS,
+  type Card,
+  type PartyBoardCreateRequest,
+} from '../shared/game.js'
 import { GameManager, type Room, type RoomPersistence } from './game.js'
 
 function readyEveryone(manager: GameManager, room: Room): void {
@@ -18,6 +23,30 @@ function setupLobby(playerCount = 3) {
 
 function setupGame(playerCount = 3) {
   const setup = setupLobby(playerCount)
+  readyEveryone(setup.manager, setup.room)
+  setup.manager.startGame(setup.room.code, setup.credentials[0].playerId)
+  return setup
+}
+
+function partyRequest(index = 1, tokenCharacter = 'A'): PartyBoardCreateRequest {
+  return {
+    requestId: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+    boardToken: tokenCharacter.repeat(43),
+  }
+}
+
+function setupPartyLobby(playerCount = 3) {
+  const manager = new GameManager()
+  const board = manager.createPartyRoom(partyRequest(), 'board-socket')
+  const credentials = []
+  for (let index = 0; index < playerCount; index += 1) {
+    credentials.push(manager.joinRoom(board.room.code, `Party Player ${index + 1}`, `party-player-${index}`).credentials)
+  }
+  return { manager, room: board.room, boardCredentials: board.credentials, credentials }
+}
+
+function setupPartyGame(playerCount = 3) {
+  const setup = setupPartyLobby(playerCount)
   readyEveryone(setup.manager, setup.room)
   setup.manager.startGame(setup.room.code, setup.credentials[0].playerId)
   return setup
@@ -825,6 +854,116 @@ describe('lobby, bots, reconnection and sessions', () => {
     const event = manager.createReaction(room.code, credentials[1].playerId, 'wah')
     expect(event).toMatchObject({ playerId: credentials[1].playerId, reaction: 'wah', createdAt: Date.now() })
     expect(() => manager.createReaction(room.code, credentials[1].playerId, 'anything')).toThrow('available reaction')
+  })
+})
+
+describe('Party board domain contract', () => {
+  it('creates idempotently, fences a replaced board, and permits recovery while fresh creation is disabled', () => {
+    const manager = new GameManager()
+    const request = partyRequest()
+    const created = manager.createPartyRoom(request, 'board-original')
+
+    expect(created.room).toMatchObject({ mode: 'party', revision: 1, players: [] })
+    expect(created.credentials).toEqual({ code: created.room.code, boardToken: request.boardToken })
+
+    const sameSocketRetry = manager.createPartyRoom(request, 'board-original', false)
+    expect(sameSocketRetry.room).toBe(created.room)
+    expect(sameSocketRetry.replacedSocketId).toBeNull()
+    expect(created.room.revision).toBe(1)
+
+    const replacement = manager.createPartyRoom(request, 'board-replacement', false)
+    expect(replacement.room).toBe(created.room)
+    expect(replacement.replacedSocketId).toBe('board-original')
+    expect(created.room.partyBoard).toMatchObject({ socketId: 'board-replacement', connected: true })
+    expect(() => manager.createPartyRoom(partyRequest(2, 'B'), 'fresh-board', false)).toThrow('not available')
+    expect(() => manager.reconnectPartyBoard(created.room.code, 'Z'.repeat(43), 'attacker')).toThrow('no longer available')
+  })
+
+  it('makes the first phone the host and keeps bots inside the three-to-eight player seat model', () => {
+    const manager = new GameManager()
+    const board = manager.createPartyRoom(partyRequest(), 'board-socket')
+    const first = manager.joinRoom(board.room.code, 'First Phone', 'phone-one')
+    const second = manager.joinRoom(board.room.code, 'Second Phone', 'phone-two')
+
+    expect(board.room.players).toHaveLength(2)
+    expect(board.room.players.find((player) => player.id === first.credentials.playerId)?.isHost).toBe(true)
+    expect(board.room.players.find((player) => player.id === second.credentials.playerId)?.isHost).toBe(false)
+
+    const bot = manager.addBot(board.room.code, first.credentials.playerId, 'Party Bot')
+    expect(bot).toMatchObject({ isBot: true, connected: true })
+    readyEveryone(manager, board.room)
+    expect(manager.view(board.room, first.credentials.playerId)).toMatchObject({ canStart: true, mode: 'party' })
+  })
+
+  it('builds the TV projection from a public allowlist and drops private card and credential fields', () => {
+    const { manager, room, boardCredentials } = setupPartyGame()
+    const privateCardId = room.players[0].hand[0].id
+    const playerTokenHash = room.players[0].tokenHash
+    room.game!.activity.unshift({
+      id: 'privacy-probe',
+      text: 'A public update.',
+      tone: 'neutral',
+      kind: 'general',
+      data: { playerId: room.players[0].id, cardId: privateCardId, secret: 'must-not-leak' },
+    })
+
+    const view = manager.boardView(room)
+    expect(view.game?.activity[0]).toEqual({
+      id: 'privacy-probe',
+      text: 'A public update.',
+      tone: 'neutral',
+      kind: 'general',
+      data: { playerId: room.players[0].id },
+    })
+    expect(view.game).not.toHaveProperty('hand')
+    expect(view.game).not.toHaveProperty('legalCardIds')
+    expect(view.game).not.toHaveProperty('waste')
+    expect(view.game).not.toHaveProperty('canTakeRightHand')
+    expect(view.game).not.toHaveProperty('takeTargetId')
+    expect(view).not.toHaveProperty('partyBoard')
+
+    const encoded = JSON.stringify(view)
+    expect(encoded).not.toContain(privateCardId)
+    expect(encoded).not.toContain(playerTokenHash)
+    expect(encoded).not.toContain(boardCredentials.boardToken)
+    expect(encoded).not.toContain('must-not-leak')
+    expect(encoded).not.toContain('socketId')
+  })
+
+  it('does not pause or refresh an active match when the board disconnects', () => {
+    const { manager, room } = setupPartyGame()
+    const before = {
+      status: room.status,
+      phase: room.game?.phase,
+      currentTurnId: room.game?.currentTurnId,
+      turnEndsAt: room.game?.turnEndsAt,
+      suspended: room.suspended,
+      updatedAt: room.updatedAt,
+      revision: room.revision,
+    }
+
+    expect(manager.disconnectPartyBoard('board-socket')).toEqual([room])
+    expect(room.partyBoard).toMatchObject({ socketId: null, connected: false })
+    expect(room).toMatchObject({
+      status: before.status,
+      suspended: before.suspended,
+      updatedAt: before.updatedAt,
+      revision: before.revision + 1,
+    })
+    expect(room.game).toMatchObject({
+      phase: before.phase,
+      currentTurnId: before.currentTurnId,
+      turnEndsAt: before.turnEndsAt,
+    })
+  })
+
+  it('expires a board-only lobby using room activity time and returns its live socket binding', () => {
+    const manager = new GameManager()
+    const { room } = manager.createPartyRoom(partyRequest(), 'idle-board')
+    room.updatedAt = Date.now() - 6 * 60 * 60 * 1000 - 1
+
+    expect(manager.removeStaleRooms()).toEqual([{ code: room.code, socketId: 'idle-board' }])
+    expect(manager.rooms.has(room.code)).toBe(false)
   })
 })
 

@@ -717,6 +717,108 @@ async function inspectLandingSeo(cdp, width, height) {
   return evaluate(cdp, landingSeoDiagnosticsExpression)
 }
 
+const partyDiagnosticsExpression = `(() => {
+  const root = document.documentElement
+  const rendered = (element) => {
+    if (!element) return false
+    const style = getComputedStyle(element)
+    const box = element.getBoundingClientRect()
+    return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > .1
+      && box.width > 0 && box.height > 0
+  }
+  const visible = (element) => {
+    if (!rendered(element)) return false
+    const box = element.getBoundingClientRect()
+    return box.right > 0 && box.left < innerWidth && box.bottom > 0 && box.top < innerHeight
+  }
+  const named = (element) => Boolean(
+    element.getAttribute('aria-label')?.trim()
+      || element.getAttribute('aria-labelledby')?.trim()
+      || element.textContent?.trim()
+      || (element instanceof HTMLInputElement && (element.labels?.length || element.title || element.placeholder)),
+  )
+  const inside = (inner, outer) => Boolean(inner && outer
+    && inner.left >= outer.left - 1 && inner.top >= outer.top - 1
+    && inner.right <= outer.right + 1 && inner.bottom <= outer.bottom + 1)
+  const overlaps = (first, second) => Boolean(first && second
+    && first.left < second.right - 1 && first.right > second.left + 1
+    && first.top < second.bottom - 1 && first.bottom > second.top + 1)
+  const controls = [...document.querySelectorAll('button:not(:disabled), select:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])')]
+    .filter(visible)
+    .map((element) => {
+      const box = element.getBoundingClientRect()
+      return { element, width: Math.round(box.width), height: Math.round(box.height) }
+    })
+  const header = document.querySelector('.party-board__header')
+  const headerRect = header?.getBoundingClientRect()
+  const brandRect = document.querySelector('.party-board__brand')?.getBoundingClientRect()
+  const center = document.querySelector('.party-board__header-center')
+  const centerRect = rendered(center) ? center.getBoundingClientRect() : null
+  const toolsRect = document.querySelector('.party-board__tools')?.getBoundingClientRect()
+  const table = document.querySelector('.party-board__table')
+  const tableRect = table?.getBoundingClientRect()
+  const statusRect = document.querySelector('.party-board__status')?.getBoundingClientRect()
+  const trickRect = document.querySelector('.party-board__trick')?.getBoundingClientRect()
+  const cardRects = [...document.querySelectorAll('.party-board__played-card .game-card')]
+    .filter(rendered)
+    .map((element) => element.getBoundingClientRect())
+  const reaction = document.querySelector('.party-board__reaction')
+  const reactionRect = rendered(reaction) ? reaction.getBoundingClientRect() : null
+  const playerRects = [...document.querySelectorAll('.party-board .party-player')]
+    .filter(rendered)
+    .map((element) => element.getBoundingClientRect())
+  const qrImage = document.querySelector('.party-qr__image img')
+  const main = document.querySelector('.party-board > main')
+  const mainRect = main?.getBoundingClientRect()
+  const ids = [...document.querySelectorAll('[id]')].map((element) => element.id)
+  return {
+    viewport: [innerWidth, innerHeight],
+    pageOverflowX: root.scrollWidth > innerWidth + 1,
+    pageOverflowY: root.scrollHeight > innerHeight + 1,
+    boardPresent: Boolean(document.querySelector('.party-board')),
+    mainCount: document.querySelectorAll('.party-board > main').length,
+    mainRendered: rendered(main),
+    mainHorizontallyContained: Boolean(mainRect && mainRect.left >= -1 && mainRect.right <= innerWidth + 1),
+    headerRendered: rendered(header),
+    headerInsideViewport: Boolean(headerRect && headerRect.left >= -1 && headerRect.top >= -1 && headerRect.right <= innerWidth + 1),
+    headerCenterOverlapsBrand: overlaps(centerRect, brandRect),
+    headerCenterOverlapsTools: overlaps(centerRect, toolsRect),
+    tableRendered: rendered(table),
+    tableHorizontallyContained: Boolean(tableRect && tableRect.left >= -1 && tableRect.right <= innerWidth + 1),
+    trickOverlapsStatus: overlaps(trickRect, statusRect),
+    cardsOutsideTable: cardRects.filter((box) => !inside(box, tableRect)).length,
+    cardsOverlapStatus: cardRects.filter((box) => overlaps(box, statusRect)).length,
+    playedCardCount: cardRects.length,
+    reactionVisible: visible(reaction),
+    reactionOverlapsTools: overlaps(reactionRect, toolsRect),
+    reactionOverlapsCards: cardRects.some((box) => overlaps(reactionRect, box)),
+    reactionOverlapsStatus: overlaps(reactionRect, statusRect),
+    reactionOverlapsPlayers: playerRects.some((box) => overlaps(reactionRect, box)),
+    qrPresent: Boolean(qrImage),
+    qrHasAlt: Boolean(qrImage?.getAttribute('alt')?.trim()),
+    roomCodePresent: Boolean(document.querySelector('.party-board__code b[dir="ltr"]')),
+    timers: document.querySelectorAll('.party-board [role="timer"]').length,
+    timersInsideLiveRegions: document.querySelectorAll('.party-board [aria-live] [role="timer"]').length,
+    privateControlCount: document.querySelectorAll('.party-board .game-v2-hand, .party-board .game-v2-action-bar, .party-board input, .party-board textarea, .party-board .game-card button').length,
+    soundToggleCount: document.querySelectorAll('.party-board__sound[aria-pressed]').length,
+    wakeLockState: document.querySelector('.party-board')?.getAttribute('data-wake-lock') ?? '',
+    touchViolations: controls.filter(({ width, height }) => width < 44 || height < 44).map(({ element, width, height }) => ({ label: element.getAttribute('aria-label') || element.textContent?.trim().slice(0, 50), width, height })),
+    unnamedControls: controls.filter(({ element }) => !named(element)).map(({ element }) => element.outerHTML.slice(0, 140)),
+    duplicateIds: [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))],
+  }
+})()`
+
+async function captureParty(cdp, name, width, height) {
+  await setViewport(cdp, width, height)
+  await evaluate(cdp, 'scrollTo(0, 0)')
+  await waitForResponsiveLayout(cdp)
+  const diagnostics = await evaluate(cdp, partyDiagnosticsExpression)
+  const screenshot = await cdp.send('Page.captureScreenshot', { format: 'png', fromSurface: true })
+  const outputPath = join(OUTPUT_DIR, `${name}-${width}x${height}.png`)
+  await writeFile(outputPath, Buffer.from(screenshot.data, 'base64'))
+  return { outputPath, ...diagnostics }
+}
+
 async function capture(cdp, name, width, height, prepare) {
   await setViewport(cdp, width, height)
   await waitForResponsiveLayout(cdp)
@@ -1103,6 +1205,85 @@ try {
   assert(platformNotice.touchViolations.length === 0, `The platform notice has touch targets under 44px: ${JSON.stringify(platformNotice.touchViolations)}`)
   assert(platformNotice.unnamedControls.length === 0, 'The platform notice has unnamed controls.')
   await evaluate(cdp, `document.getElementById('platform-notices')?.replaceChildren()`)
+
+  const partyFixtureDefinitions = [
+    { mode: 'lobby', viewports: [[1280, 720], [844, 390], [375, 667], [320, 480]] },
+    { mode: 'playing', viewports: [[1280, 720], [844, 390], [640, 360], [375, 667]] },
+    { mode: 'many', viewports: [[1280, 720], [844, 390]] },
+    { mode: 'resolving', viewports: [[1280, 720], [844, 390], [375, 667], [320, 480]] },
+    { mode: 'reconnect', viewports: [[844, 390], [375, 667]] },
+    { mode: 'finished', viewports: [[1280, 720], [844, 390], [375, 667]] },
+    { mode: 'reaction', viewports: [[1280, 720], [844, 390], [375, 667]] },
+    { mode: 'reaction', name: 'reaction-rtl', language: 'ur', viewports: [[844, 390], [375, 667]] },
+    { mode: 'offline', viewports: [[844, 390], [375, 667]] },
+    { mode: 'expired', viewports: [[375, 667]] },
+  ]
+  const partyFixtureResults = {}
+  for (const fixture of partyFixtureDefinitions) {
+    const fixtureName = fixture.name ?? fixture.mode
+    const results = []
+    for (const [width, height] of fixture.viewports) {
+      await evaluate(cdp, `localStorage.setItem('thulla:language', ${JSON.stringify(fixture.language ?? 'en')})`)
+      await cdp.send('Page.navigate', { url: `${CLIENT_URL}/?partyQa=${fixture.mode}` })
+      await waitForExpression(cdp, `Boolean(document.querySelector('.party-board > main'))`)
+      if (fixture.language === 'ur') await waitForExpression(cdp, `document.documentElement.lang === 'ur-PK' && document.documentElement.dir === 'rtl'`)
+      const result = await captureParty(cdp, `party-${fixtureName}`, width, height)
+      results.push(result)
+      const context = `Party ${fixtureName} fixture at ${width}x${height}`
+      assert(result.boardPresent && result.mainCount === 1 && result.mainRendered, `${context} does not expose one rendered main surface.`)
+      assert(!result.pageOverflowX && result.mainHorizontallyContained, `${context} has horizontal overflow.`)
+      assert(result.headerRendered && result.headerInsideViewport, `${context} clips the shared-board header.`)
+      assert(!result.headerCenterOverlapsBrand && !result.headerCenterOverlapsTools, `${context} overlaps the centered board state with header controls.`)
+      assert(result.touchViolations.length === 0, `${context} has controls under 44px: ${JSON.stringify(result.touchViolations)}`)
+      assert(result.unnamedControls.length === 0, `${context} has unnamed controls.`)
+      assert(result.duplicateIds.length === 0, `${context} has duplicate IDs: ${JSON.stringify(result.duplicateIds)}`)
+      assert(result.privateControlCount === 0, `${context} leaked ${result.privateControlCount} private hand/chat controls onto the board.`)
+      assert(result.timersInsideLiveRegions === 0, `${context} places a ticking timer inside an aria-live region.`)
+      assert(result.soundToggleCount === 1, `${context} does not expose one accessible board-sound preference.`)
+      assert(['active', 'pending', 'unsupported'].includes(result.wakeLockState), `${context} has no explicit Wake Lock state.`)
+      if (width >= 640 && height <= 720) assert(!result.pageOverflowY, `${context} unexpectedly scrolls the shared-screen viewport.`)
+      if (['playing', 'many', 'resolving', 'reconnect', 'reaction', 'offline'].includes(fixture.mode)) {
+        assert(result.tableRendered && result.tableHorizontallyContained, `${context} does not contain the public card table.`)
+        assert(!result.trickOverlapsStatus, `${context} overlaps the trick region and status panel.`)
+        assert(result.cardsOutsideTable === 0, `${context} renders ${result.cardsOutsideTable} public cards outside the table.`)
+        assert(result.cardsOverlapStatus === 0, `${context} covers the status panel with ${result.cardsOverlapStatus} public cards.`)
+      }
+      if (fixture.mode === 'lobby') {
+        assert(result.qrPresent && result.qrHasAlt, `${context} is missing an accessible join QR code.`)
+        assert(result.roomCodePresent, `${context} is missing the LTR room code.`)
+      }
+      if (fixture.mode === 'resolving') assert(result.playedCardCount === 3, `${context} does not keep all three THULLA cards visible.`)
+      if (fixture.mode === 'reaction') {
+        assert(result.reactionVisible, `${context} does not show the public table reaction.`)
+        assert(!result.reactionOverlapsTools && !result.reactionOverlapsCards && !result.reactionOverlapsStatus && !result.reactionOverlapsPlayers, `${context} lets the reaction obscure controls, players, cards, or status.`)
+      }
+    }
+    partyFixtureResults[fixtureName] = results
+  }
+  await evaluate(cdp, `localStorage.setItem('thulla:language', 'en')`)
+
+  await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })
+  await cdp.send('Page.navigate', { url: `${CLIENT_URL}/?partyQa=resolving` })
+  await waitForExpression(cdp, `Boolean(document.querySelector('.party-board--playing'))`)
+  const partyReducedMotion = await evaluate(cdp, `(() => ({
+    enabled: matchMedia('(prefers-reduced-motion: reduce)').matches,
+    animated: [...document.querySelectorAll('.party-board *')]
+      .filter((element) => getComputedStyle(element).animationName !== 'none')
+      .map((element) => element.className),
+  }))()`)
+  assert(partyReducedMotion.enabled, 'Party reduced-motion emulation did not activate.')
+  assert(partyReducedMotion.animated.length === 0, `Party reduced motion left animations active: ${JSON.stringify(partyReducedMotion.animated)}`)
+  await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] })
+
+  if (process.env.QA_PARTY_FIXTURES_ONLY === 'true') {
+    const consoleProblems = browserProblems(cdp)
+    assert(consoleProblems.length === 0, `Browser console errors were recorded: ${consoleProblems.join(' | ')}`)
+    const report = { partyFixtures: partyFixtureResults, reducedMotion: partyReducedMotion, consoleProblems, failures }
+    const reportPath = join(OUTPUT_DIR, 'party-visual-qa-report.json')
+    await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`)
+    console.log(JSON.stringify(report, null, 2))
+    if (failures.length) process.exitCode = 1
+  } else {
 
   const fixtureDefinitions = [
     { mode: 'lobby', selector: '.lobby-shell' },
@@ -1501,6 +1682,8 @@ try {
       platformNotice,
     },
     fixtures: fixtureResults,
+    partyFixtures: partyFixtureResults,
+    partyReducedMotion,
     polish: {
       opponentKeyboard,
       resultActionReachability,
@@ -1523,6 +1706,7 @@ try {
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`)
   console.log(JSON.stringify(report, null, 2))
   if (failures.length) process.exitCode = 1
+  }
 } finally {
   for (const socket of sockets) socket.disconnect()
   if (cdp) {

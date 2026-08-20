@@ -48,11 +48,14 @@ Useful commands:
 npm test
 npm run build
 npm run qa:platform
+npm run qa:party-visual
 npm run qa:visual
 npm start
 ```
 
 `npm run qa:platform` validates the manifest, install icons, social preview, metadata, service-worker update policy and cache exclusions.
+
+With `npm run dev` already running, `npm run qa:party-visual` runs the deterministic shared-board matrix without creating a live match. It covers lobby, play, eight seats, THULLA resolution, reconnect, results, reactions, offline/expired recovery, Urdu/RTL, reduced motion, 320px phones, 844×390 landscape and a 640×360 effective 200%-zoom viewport. It also rejects private controls on the board, card/status/player collisions, horizontal overflow, sub-44px controls, inaccessible QR/sound controls and chat/hand leakage.
 
 With `npm run dev` already running, `npm run qa:visual` creates a real eight-player match and verifies:
 
@@ -66,7 +69,7 @@ With `npm run dev` already running, `npm run qa:visual` creates a real eight-pla
 - Short-laptop gameplay, chat and results at 1366×600
 - Horizontal overflow, 44px touch targets, accessible names, duplicate IDs, display-card semantics, reduced motion and console errors
 
-Screenshots and `visual-qa-report.json` are written to `design/qa/`.
+Screenshots plus `visual-qa-report.json` and `party-visual-qa-report.json` are written to `design/qa/`.
 
 `npm run build` creates:
 
@@ -81,6 +84,7 @@ Screenshots and `visual-qa-report.json` are written to `design/qa/`.
 | `VITE_APP_COMMIT` | Frontend build | Recommended | Git commit shown in build diagnostics and used to version the service worker |
 | `CLIENT_ORIGIN` | Server | Production | `https://thulla.joypad.fun`; comma-separate additional trusted origins |
 | `PORT` | Server | Provided by Render | Public HTTP and WebSocket port |
+| `PARTY_MODE` | Server | Optional | `off` (default), `beta`, or `public`; keep `off` until the Party UI is released |
 | `REDIS_URL` | Server | Optional | Redis-compatible connection URL for shared room state |
 | `REDIS_KEY_PREFIX` | Server | Optional | Namespace for room keys; defaults to `bhabhi-thulla:room:` |
 | `REDIS_DURABLE` | Server | Optional | Set to `true` only when the selected Redis provider really persists across restart |
@@ -97,6 +101,7 @@ The existing production stack is Hostinger at `thulla.joypad.fun`, the Render se
 NODE_ENV=production
 NODE_VERSION=22
 CLIENT_ORIGIN=https://thulla.joypad.fun
+PARTY_MODE=off
 REDIS_URL=rediss://default:YOUR_UPSTASH_PASSWORD@YOUR_UPSTASH_ENDPOINT:6379
 REDIS_KEY_PREFIX=bhabhi-thulla:room:
 REDIS_DURABLE=true
@@ -105,6 +110,8 @@ REDIS_DURABLE=true
 Copy only the `rediss://...` URL from Upstash's **node-redis** connection example into `REDIS_URL`; do not paste the JavaScript example. Keep the URL in Render's secret environment-variable field and never commit it. Render supplies `PORT` and `RENDER_GIT_COMMIT`, so do not set either manually there.
 
 Upstash persists data to durable storage, so `REDIS_DURABLE=true` is correct for this deployment. The game still expires abandoned room keys after six hours by design. If the Redis provider is changed, reassess this flag instead of copying it blindly.
+
+`PARTY_MODE=off` still advertises the additive `party-v1` protocol capability, but rejects fresh Party-board creation. Exact create recovery, saved-board reconnects, and direct phone joins to an existing Party room remain available so a rollout switch cannot strand an active match. Keep this setting at `off` until the Party frontend is deployed and its beta production smoke test passes.
 
 Rotate any Upstash password whose full connection URL has ever been pasted into chat, an issue, a screenshot, a log, or any other non-secret location. After rotation, replace `REDIS_URL` in Render and redeploy once.
 
@@ -128,11 +135,12 @@ The included `render.yaml` defines the web service.
 4. Build with `npm ci --include=dev && npm run build:server`. The server is compiled from TypeScript, so Render must install the compiler and declaration packages even when `NODE_ENV=production`.
 5. Start with `npm start`.
 6. Set `CLIENT_ORIGIN=https://thulla.joypad.fun`. Add local/staging origins as a comma-separated list only when needed.
-7. Render supplies `PORT` and `RENDER_GIT_COMMIT`; use `COMMIT_SHA` on another host if it does not provide a revision automatically.
-8. Add `REDIS_URL` when shared persistence is available. Optionally isolate deployments with `REDIS_KEY_PREFIX`.
-9. Set `REDIS_DURABLE=true` only for a provider that guarantees persistence across restart. Leave it `false` for memory-only and Render Free Key Value.
-10. Verify `https://YOUR-SERVICE.onrender.com/health` for process liveness and version information.
-11. Verify `https://YOUR-SERVICE.onrender.com/ready` reports the expected persistence mode and readiness before deploying the frontend.
+7. Keep `PARTY_MODE=off` for the initial backend/frontend deploy, then use `beta` for the controlled Party smoke test. Invalid or missing values fail closed to `off`; use `public` only after the production board/controller test passes.
+8. Render supplies `PORT` and `RENDER_GIT_COMMIT`; use `COMMIT_SHA` on another host if it does not provide a revision automatically.
+9. Add `REDIS_URL` when shared persistence is available. Optionally isolate deployments with `REDIS_KEY_PREFIX`.
+10. Set `REDIS_DURABLE=true` only for a provider that guarantees persistence across restart. Leave it `false` for memory-only and Render Free Key Value.
+11. Verify `https://YOUR-SERVICE.onrender.com/health` for process liveness and version information.
+12. Verify `https://YOUR-SERVICE.onrender.com/ready` reports the expected persistence mode and readiness before deploying the frontend.
 
 For the current service, the two checks are:
 

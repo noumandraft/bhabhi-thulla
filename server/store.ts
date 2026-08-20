@@ -1,7 +1,22 @@
 import { createClient, type RedisClientType } from 'redis'
-import type { PersistenceStatus, Player, Room, RoomPersistence } from './game.js'
+import type { RoomMode } from '../shared/game.js'
+import type { PartyBoard, PersistenceStatus, Player, Room, RoomPersistence } from './game.js'
 
 const DEFAULT_TTL_SECONDS = 6 * 60 * 60
+const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/
+
+interface PersistedPartyBoard {
+  tokenHash: string
+  creationRequestHash: string | null
+  creationRequestExpiresAt: number | null
+}
+
+export type PersistedRoom = Omit<Room, 'players' | 'suspended' | 'partyBoard'> & {
+  players: Omit<Player, 'socketId'>[]
+  revision: number
+  mode: RoomMode
+  partyBoard: PersistedPartyBoard | null
+}
 
 /**
  * Development/default store. It intentionally does not pretend to survive a process restart.
@@ -16,29 +31,133 @@ export class MemoryRoomStore implements RoomPersistence {
 }
 
 function persistedPlayer(player: Player): Omit<Player, 'socketId'> {
-  const { socketId: _socketId, ...safe } = player
   return {
-    ...safe,
+    id: player.id,
+    tokenHash: player.tokenHash,
+    name: player.name,
+    hand: player.hand,
     // Human transport presence is process-local. Bots are always available to the game engine.
-    connected: safe.isBot,
+    connected: player.isBot,
+    escaped: player.escaped,
+    isHost: player.isHost,
+    ready: player.ready,
+    isBot: player.isBot,
+    rematchReady: player.rematchReady,
+    waitingForNextRound: player.waitingForNextRound,
+    joinedInRound: player.joinedInRound,
+    reconnectGraceUsed: player.reconnectGraceUsed,
+    usesReadyProtocol: player.usesReadyProtocol,
   }
 }
 
-export function persistenceSnapshot(room: Room): Omit<Room, 'players' | 'suspended'> & { players: Omit<Player, 'socketId'>[] } {
-  const { suspended: _suspended, ...safe } = room
+function persistedPartyBoard(board: PartyBoard | null): PersistedPartyBoard | null {
+  if (!board || !SHA256_HEX_PATTERN.test(board.tokenHash)) return null
+  const requestActive = Boolean(
+    board.creationRequestHash
+    && SHA256_HEX_PATTERN.test(board.creationRequestHash)
+    && board.creationRequestExpiresAt
+    && board.creationRequestExpiresAt > Date.now(),
+  )
   return {
-    ...safe,
-    players: room.players.map(persistedPlayer),
+    tokenHash: board.tokenHash,
+    creationRequestHash: requestActive ? board.creationRequestHash : null,
+    creationRequestExpiresAt: requestActive ? board.creationRequestExpiresAt : null,
   }
 }
 
-function looksLikeRoom(value: unknown): value is Room {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const room = value as Partial<Room>
-  return typeof room.code === 'string'
-    && Array.isArray(room.players)
-    && (room.status === 'lobby' || room.status === 'playing' || room.status === 'finished')
-    && typeof room.updatedAt === 'number'
+export function persistenceSnapshot(room: Room): PersistedRoom {
+  const mode: RoomMode = room.mode === 'party' ? 'party' : 'online'
+  return {
+    code: room.code,
+    status: room.status,
+    players: room.players.map(persistedPlayer),
+    game: room.game,
+    settings: room.settings,
+    session: room.session,
+    updatedAt: room.updatedAt,
+    revision: Number.isInteger(room.revision) && room.revision >= 0 ? room.revision : 0,
+    mode,
+    partyBoard: mode === 'party' ? persistedPartyBoard(room.partyBoard) : null,
+  }
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+function safePartyBoard(value: unknown): PersistedPartyBoard | null {
+  const board = record(value)
+  if (!board || typeof board.tokenHash !== 'string' || !SHA256_HEX_PATTERN.test(board.tokenHash)) return null
+  const requestActive = typeof board.creationRequestHash === 'string'
+    && SHA256_HEX_PATTERN.test(board.creationRequestHash)
+    && typeof board.creationRequestExpiresAt === 'number'
+    && Number.isFinite(board.creationRequestExpiresAt)
+    && board.creationRequestExpiresAt > Date.now()
+  return {
+    tokenHash: board.tokenHash,
+    creationRequestHash: requestActive ? board.creationRequestHash as string : null,
+    creationRequestExpiresAt: requestActive ? board.creationRequestExpiresAt as number : null,
+  }
+}
+
+function safePersistedPlayer(value: unknown): Omit<Player, 'socketId'> | null {
+  const player = record(value)
+  if (!player || typeof player.id !== 'string' || typeof player.tokenHash !== 'string' || typeof player.name !== 'string') return null
+  if (!Array.isArray(player.hand) || typeof player.isBot !== 'boolean') return null
+  return {
+    id: player.id,
+    tokenHash: player.tokenHash,
+    name: player.name,
+    hand: player.hand as Player['hand'],
+    connected: player.isBot,
+    escaped: Boolean(player.escaped),
+    isHost: Boolean(player.isHost),
+    ready: Boolean(player.ready),
+    isBot: player.isBot,
+    rematchReady: Boolean(player.rematchReady),
+    waitingForNextRound: Boolean(player.waitingForNextRound),
+    joinedInRound: typeof player.joinedInRound === 'number' ? player.joinedInRound : 1,
+    reconnectGraceUsed: Boolean(player.reconnectGraceUsed),
+    usesReadyProtocol: Boolean(player.usesReadyProtocol),
+  }
+}
+
+function safePersistedRoom(value: unknown): Room | null {
+  const source = record(value)
+  if (!source) return null
+  if (typeof source.code !== 'string' || !Array.isArray(source.players)) return null
+  if (source.status !== 'lobby' && source.status !== 'playing' && source.status !== 'finished') return null
+  if (typeof source.updatedAt !== 'number' || !Number.isFinite(source.updatedAt)) return null
+  if (source.mode !== undefined && source.mode !== 'online' && source.mode !== 'party') return null
+
+  const players = source.players.map(safePersistedPlayer)
+  if (players.some((player) => player === null)) return null
+
+  const mode: RoomMode = source.mode === 'party' ? 'party' : 'online'
+  const partyBoard = mode === 'party' ? safePartyBoard(source.partyBoard) : null
+  if (mode === 'party' && !partyBoard) return null
+
+  const revision = typeof source.revision === 'number'
+    && Number.isInteger(source.revision)
+    && source.revision >= 0
+    ? source.revision
+    : 0
+
+  // Build from an allowlist so unexpected persisted fields (including transport
+  // presence, raw credentials, suspension, and chat data) never enter live state.
+  return {
+    code: source.code,
+    status: source.status,
+    players: players as Omit<Player, 'socketId'>[],
+    game: (source.game ?? null) as Room['game'],
+    settings: source.settings as Room['settings'],
+    session: source.session as Room['session'],
+    updatedAt: source.updatedAt,
+    revision,
+    mode,
+    partyBoard,
+  } as unknown as Room
 }
 
 export class RedisRoomStore implements RoomPersistence {
@@ -53,7 +172,7 @@ export class RedisRoomStore implements RoomPersistence {
     this.client = createClient({ url })
     this.client.on('error', (error) => {
       this.lastError = error instanceof Error ? error.message : String(error)
-      console.error('redis_error', { error: this.lastError })
+      console.error('redis_error', { category: 'persistence' })
     })
     this.client.on('ready', () => { this.lastError = undefined })
   }
@@ -72,10 +191,11 @@ export class RedisRoomStore implements RoomPersistence {
         if (!encoded) continue
         try {
           const parsed: unknown = JSON.parse(encoded)
-          if (looksLikeRoom(parsed)) rooms.push(parsed)
-          else console.warn('redis_room_ignored', { key, reason: 'invalid_shape' })
-        } catch (error) {
-          console.warn('redis_room_ignored', { key, reason: error instanceof Error ? error.message : String(error) })
+          const room = safePersistedRoom(parsed)
+          if (room) rooms.push(room)
+          else console.warn('redis_room_ignored', { category: 'persistence', reason: 'invalid_shape' })
+        } catch {
+          console.warn('redis_room_ignored', { category: 'persistence', reason: 'invalid_json' })
         }
       }
     }

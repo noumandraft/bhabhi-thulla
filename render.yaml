@@ -15,6 +15,9 @@ services:
         value: production
       - key: CLIENT_ORIGIN
         value: https://thulla.joypad.fun
+      # Keep fresh Party-room creation disabled until the Party UI is released.
+      - key: PARTY_MODE
+        value: "off"
       - key: REDIS_KEY_PREFIX
         value: "bhabhi-thulla:room:"
       # Add REDIS_URL in the Render dashboard when shared storage is available.

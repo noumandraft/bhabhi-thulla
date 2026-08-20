@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { io as connect, type Socket } from 'socket.io-client'
 import {
@@ -6,6 +6,9 @@ import {
   type Ack,
   type ChatHistory,
   type ChatMessage,
+  type PartyBoardCredentials,
+  type PartyBoardCreateRequest,
+  type PartyBoardView,
   type ReactionEvent,
   type RoomCredentials,
   type RoomLeaveResult,
@@ -32,6 +35,41 @@ function connectedSocket(url: string, usesReadyProtocol = true): Promise<Socket>
 
 function emitAck<T = undefined>(socket: Socket, event: string, payload: unknown): Promise<Ack<T>> {
   return new Promise((fulfill) => socket.emit(event, payload, (ack: Ack<T>) => fulfill(ack)))
+}
+
+function makeBoardRequest(): PartyBoardCreateRequest {
+  return {
+    requestId: randomUUID(),
+    boardToken: randomBytes(32).toString('base64url'),
+  }
+}
+
+function nextEvent<T>(socket: Socket, event: string): Promise<T> {
+  return new Promise((fulfill) => socket.once(event, fulfill))
+}
+
+function nextMatchingEvent<T>(socket: Socket, event: string, matches: (value: T) => boolean): Promise<T> {
+  return new Promise((fulfill) => {
+    const listener = (value: T) => {
+      if (!matches(value)) return
+      socket.off(event, listener)
+      fulfill(value)
+    }
+    socket.on(event, listener)
+  })
+}
+
+function recursiveKeys(value: unknown, output = new Set<string>()): Set<string> {
+  if (!value || typeof value !== 'object') return output
+  if (Array.isArray(value)) {
+    for (const item of value) recursiveKeys(item, output)
+    return output
+  }
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    output.add(key)
+    recursiveKeys(item, output)
+  }
+  return output
 }
 
 describe('Socket.IO server protocol', () => {
@@ -68,7 +106,9 @@ describe('Socket.IO server protocol', () => {
     sockets.push(await connectedSocket(url), await connectedSocket(url), await connectedSocket(url))
     expect((sockets[0] as ObservedSocket).observedHello).toEqual({
       protocolVersion: PROTOCOL_VERSION,
-      capabilities: ['chat-v1'],
+      capabilities: ['chat-v1', 'party-v1'],
+      partyMode: 'off',
+      serverNow: expect.any(Number),
     })
     const created = await emitAck<RoomCredentials>(sockets[0], 'room:create', { name: 'Host Player' })
     expect(created.ok).toBe(true)
@@ -496,6 +536,399 @@ describe('Socket.IO server protocol', () => {
       ok: false,
       error: expect.stringContaining('wait'),
     })
+  })
+  it('advertises Party capability and fails closed for missing or invalid availability', async () => {
+    for (const [configured, expected] of [
+      [undefined, 'off'],
+      ['PUBLIC', 'off'],
+      ['unexpected', 'off'],
+      ['beta', 'beta'],
+      ['public', 'public'],
+    ] as const) {
+      gameServer = await createGameServer({
+        ...process.env,
+        NODE_ENV: 'test',
+        CLIENT_ORIGIN: 'http://localhost:5173',
+        REDIS_URL: '',
+        PARTY_MODE: configured,
+      })
+      const port = await gameServer.listen(0)
+      const socket = await connectedSocket(`http://127.0.0.1:${port}`) as ObservedSocket
+      sockets.push(socket)
+      await vi.waitFor(() => expect(socket.observedHello).toBeDefined())
+      expect(socket.observedHello).toMatchObject({
+        protocolVersion: PROTOCOL_VERSION,
+        capabilities: ['chat-v1', 'party-v1'],
+        partyMode: expected,
+        serverNow: expect.any(Number),
+      })
+      expect(Math.abs(Date.now() - socket.observedHello!.serverNow!)).toBeLessThan(5_000)
+      socket.disconnect()
+      sockets.pop()
+      await gameServer.close()
+      gameServer = undefined
+    }
+  })
+
+  it('keeps Party board traffic public-only while phones retain private state and actions', async () => {
+    gameServer = await createGameServer({
+      ...process.env,
+      NODE_ENV: 'test',
+      CLIENT_ORIGIN: 'http://localhost:5173',
+      REDIS_URL: '',
+      PARTY_MODE: 'beta',
+    })
+    const port = await gameServer.listen(0)
+    const url = `http://127.0.0.1:${port}`
+    sockets.push(
+      await connectedSocket(url),
+      await connectedSocket(url),
+      await connectedSocket(url),
+      await connectedSocket(url),
+    )
+    const [board, host, second, third] = sockets
+    const boardRoomStates: RoomView[] = []
+    const boardChat: ChatMessage[] = []
+    const phoneBoardStates: PartyBoardView[][] = [[], [], []]
+    board.on('room:state', (state: RoomView) => boardRoomStates.push(state))
+    board.on('room:chat:message', (message: ChatMessage) => boardChat.push(message))
+    ;[host, second, third].forEach((socket, index) => {
+      socket.on('party:board:state', (state: PartyBoardView) => phoneBoardStates[index].push(state))
+    })
+
+    const request = makeBoardRequest()
+    const initialBoardState = nextEvent<PartyBoardView>(board, 'party:board:state')
+    const created = await emitAck<PartyBoardCredentials>(board, 'party:board:create', request)
+    expect(created).toEqual({
+      ok: true,
+      data: { code: expect.stringMatching(/^[A-HJ-NP-Z2-9]{5}$/), boardToken: request.boardToken },
+    })
+    expect(await initialBoardState).toMatchObject({
+      protocolVersion: PROTOCOL_VERSION,
+      revision: expect.any(Number),
+      serverNow: expect.any(Number),
+      mode: 'party',
+      code: created.data!.code,
+      status: 'lobby',
+      players: [],
+      game: null,
+    })
+
+    expect(await emitAck<PartyBoardCredentials>(board, 'party:board:create', request)).toEqual(created)
+    expect(gameServer.manager.rooms.size).toBe(1)
+    expect(await emitAck(board, 'party:board:create', { ...request, extra: true })).toMatchObject({
+      ok: false,
+      error: 'Invalid request fields.',
+    })
+    expect(await emitAck(board, 'room:create', { name: 'Board is not a player' })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('already connected'),
+    })
+    expect(await emitAck(board, 'game:start', {})).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('Reconnect'),
+    })
+    expect(await emitAck(board, 'room:chat:history', {})).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('Reconnect'),
+    })
+
+    const credentials: RoomCredentials[] = []
+    for (const [index, socket] of [host, second, third].entries()) {
+      const response = await emitAck<RoomCredentials>(socket, 'room:join', {
+        code: created.data!.code,
+        name: `Phone ${index + 1}`,
+      })
+      expect(response.ok).toBe(true)
+      credentials.push(response.data!)
+      expect((await emitAck(socket, 'room:ready', { ready: true })).ok).toBe(true)
+    }
+    const startedBoardState = nextMatchingEvent<PartyBoardView>(
+      board,
+      'party:board:state',
+      (state) => state.status === 'playing',
+    )
+    expect((await emitAck(host, 'game:start', {})).ok).toBe(true)
+    const publicState = await startedBoardState
+    const room = gameServer.manager.rooms.get(created.data!.code)!
+    const privateState = gameServer.manager.view(room, credentials[0].playerId)
+    expect(publicState).toMatchObject({
+      mode: 'party',
+      revision: privateState.revision,
+      status: 'playing',
+      players: [
+        { name: 'Phone 1', isHost: true, cardCount: expect.any(Number) },
+        { name: 'Phone 2', isHost: false, cardCount: expect.any(Number) },
+        { name: 'Phone 3', isHost: false, cardCount: expect.any(Number) },
+      ],
+      game: { phase: 'turn', trick: [], resolvedTrick: null },
+    })
+    const forbiddenKeys = [
+      'hand', 'legalCardIds', 'token', 'tokenHash', 'requestId', 'creationRequestHash',
+      'creationRequestExpiresAt', 'socketId', 'usesReadyProtocol', 'pendingWasteCards',
+      'waste', 'cardId', 'canTakeRightHand', 'takeTargetId',
+    ]
+    const keys = recursiveKeys(publicState)
+    for (const key of forbiddenKeys) expect(keys.has(key), key).toBe(false)
+    const encodedBoard = JSON.stringify(publicState)
+    for (const player of room.players) {
+      for (const card of player.hand) expect(encodedBoard).not.toContain(card.id)
+    }
+    expect(privateState.game?.hand.length).toBeGreaterThan(0)
+    expect(privateState.partyBoardConnected).toBe(true)
+
+    expect((await emitAck<ChatMessage>(host, 'room:chat:send', {
+      clientMessageId: randomUUID(),
+      text: 'Phones only: private table talk',
+    })).ok).toBe(true)
+    await new Promise((fulfill) => setTimeout(fulfill, 20))
+    expect(boardChat).toEqual([])
+
+    const boardReaction = nextEvent<ReactionEvent>(board, 'room:reaction')
+    expect((await emitAck<ReactionEvent>(host, 'room:react', { reaction: 'wah' })).ok).toBe(true)
+    expect(await boardReaction).toMatchObject({
+      playerId: credentials[0].playerId,
+      playerName: 'Phone 1',
+      reaction: 'wah',
+    })
+    await new Promise((fulfill) => setTimeout(fulfill, 20))
+    expect(boardRoomStates).toEqual([])
+    expect(phoneBoardStates).toEqual([[], [], []])
+  })
+  it('fences replaced boards and lets play continue through a board disconnect and reconnect', async () => {
+    gameServer = await createGameServer({
+      ...process.env,
+      NODE_ENV: 'test',
+      CLIENT_ORIGIN: 'http://localhost:5173',
+      REDIS_URL: '',
+      PARTY_MODE: 'public',
+    })
+    const port = await gameServer.listen(0)
+    const url = `http://127.0.0.1:${port}`
+    sockets.push(
+      await connectedSocket(url),
+      await connectedSocket(url),
+      await connectedSocket(url),
+      await connectedSocket(url),
+      await connectedSocket(url),
+    )
+    const [firstBoard, replacementBoard, host, second, third] = sockets
+    const request = makeBoardRequest()
+    const created = await emitAck<PartyBoardCredentials>(firstBoard, 'party:board:create', request)
+    expect(created.ok).toBe(true)
+
+    const replacedEvent = nextEvent<{ code: string }>(firstBoard, 'party:board:replaced')
+    const replacementState = nextEvent<PartyBoardView>(replacementBoard, 'party:board:state')
+    expect(await emitAck<PartyBoardCredentials>(replacementBoard, 'party:board:reconnect', {
+      code: created.data!.code,
+      boardToken: created.data!.boardToken,
+    })).toEqual(created)
+    expect(await replacedEvent).toEqual({ code: created.data!.code })
+    expect((await replacementState).code).toBe(created.data!.code)
+    const firstServerSocket = gameServer.io.sockets.sockets.get(firstBoard.id!)!
+    expect(firstServerSocket.data.connectionRole).toBeUndefined()
+    expect(firstServerSocket.data.roomCode).toBeUndefined()
+
+    const oldBoardStates: PartyBoardView[] = []
+    firstBoard.on('party:board:state', (state: PartyBoardView) => oldBoardStates.push(state))
+    const credentials: RoomCredentials[] = []
+    for (const [index, socket] of [host, second, third].entries()) {
+      const joined = await emitAck<RoomCredentials>(socket, 'room:join', {
+        code: created.data!.code,
+        name: `Continuity ${index + 1}`,
+      })
+      expect(joined.ok).toBe(true)
+      credentials.push(joined.data!)
+      expect((await emitAck(socket, 'room:ready', { ready: true })).ok).toBe(true)
+    }
+    const currentBoardState = nextMatchingEvent<PartyBoardView>(
+      replacementBoard,
+      'party:board:state',
+      (state) => state.status === 'playing',
+    )
+    expect((await emitAck(host, 'game:start', {})).ok).toBe(true)
+    const beforeDisconnect = await currentBoardState
+    const room = gameServer.manager.rooms.get(created.data!.code)!
+    const phaseBefore = room.game?.phase
+    const turnBefore = room.game?.currentTurnId
+    const deadlineBefore = room.game?.turnEndsAt
+
+    const phoneSeesDisconnect = nextMatchingEvent<RoomView>(
+      host,
+      'room:state',
+      (state) => !state.partyBoardConnected,
+    )
+    replacementBoard.disconnect()
+    const disconnectedView = await phoneSeesDisconnect
+    expect(disconnectedView.partyBoardConnected).toBe(false)
+    expect(room.game).toMatchObject({
+      phase: phaseBefore,
+      currentTurnId: turnBefore,
+      turnEndsAt: deadlineBefore,
+    })
+    expect(room.suspended).not.toBe(true)
+
+    const returningBoard = await connectedSocket(url)
+    sockets.push(returningBoard)
+    const reconnectedState = nextMatchingEvent<PartyBoardView>(
+      returningBoard,
+      'party:board:state',
+      (state) => state.status === 'playing',
+    )
+    const phoneSeesReconnect = nextMatchingEvent<RoomView>(
+      host,
+      'room:state',
+      (state) => state.partyBoardConnected && state.revision > disconnectedView.revision,
+    )
+    expect(await emitAck<PartyBoardCredentials>(returningBoard, 'party:board:reconnect', {
+      code: created.data!.code,
+      boardToken: created.data!.boardToken,
+    })).toEqual(created)
+    expect(await reconnectedState).toMatchObject({
+      code: beforeDisconnect.code,
+      status: 'playing',
+      game: { phase: phaseBefore, currentTurnId: turnBefore, turnEndsAt: deadlineBefore },
+    })
+    expect((await phoneSeesReconnect).partyBoardConnected).toBe(true)
+    await new Promise((fulfill) => setTimeout(fulfill, 20))
+    expect(oldBoardStates).toEqual([])
+
+    expect(await emitAck(firstBoard, 'party:board:reconnect', {
+      code: created.data!.code,
+      boardToken: created.data!.boardToken,
+    })).toMatchObject({ ok: true })
+    expect(await emitAck(host, 'party:board:reconnect', {
+      code: created.data!.code,
+      boardToken: created.data!.boardToken,
+    })).toMatchObject({ ok: false, error: expect.stringContaining('already seated') })
+    expect(credentials).toHaveLength(3)
+  })
+
+  it('blocks fresh Party creation while off but preserves exact recovery, board reconnect, and phone join', async () => {
+    gameServer = await createGameServer({
+      ...process.env,
+      NODE_ENV: 'test',
+      CLIENT_ORIGIN: 'http://localhost:5173',
+      REDIS_URL: '',
+      PARTY_MODE: 'off',
+    })
+    const port = await gameServer.listen(0)
+    const url = `http://127.0.0.1:${port}`
+    sockets.push(await connectedSocket(url), await connectedSocket(url), await connectedSocket(url))
+    const [board, replacement, phone] = sockets
+
+    expect(await emitAck(board, 'party:board:create', makeBoardRequest())).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('not available'),
+    })
+    expect(gameServer.manager.rooms.size).toBe(0)
+
+    const recoverable = makeBoardRequest()
+    const seeded = gameServer.manager.createPartyRoom(recoverable, 'lost-ack-socket', true)
+    const recovered = await emitAck<PartyBoardCredentials>(board, 'party:board:create', recoverable)
+    expect(recovered).toEqual({ ok: true, data: seeded.credentials })
+    expect(gameServer.manager.rooms.size).toBe(1)
+
+    expect(await emitAck<PartyBoardCredentials>(replacement, 'party:board:reconnect', {
+      code: seeded.credentials.code,
+      boardToken: seeded.credentials.boardToken,
+    })).toEqual({ ok: true, data: seeded.credentials })
+    expect(await emitAck<RoomCredentials>(phone, 'room:join', {
+      code: seeded.credentials.code,
+      name: 'Phone in existing room',
+    })).toMatchObject({ ok: true, data: { code: seeded.credentials.code } })
+    expect(await emitAck(replacement, 'party:board:reconnect', {
+      code: seeded.credentials.code,
+      boardToken: `${seeded.credentials.boardToken}x`,
+    })).toMatchObject({ ok: false })
+  })
+
+  it('expires an idle empty Party room, clears the board role, and lets that socket create again', async () => {
+    gameServer = await createGameServer({
+      ...process.env,
+      NODE_ENV: 'test',
+      CLIENT_ORIGIN: 'http://localhost:5173',
+      REDIS_URL: '',
+      PARTY_MODE: 'public',
+    })
+    const port = await gameServer.listen(0)
+    const url = `http://127.0.0.1:${port}`
+    const board = await connectedSocket(url)
+    sockets.push(board)
+    const first = await emitAck<PartyBoardCredentials>(board, 'party:board:create', makeBoardRequest())
+    expect(first.ok).toBe(true)
+    const room = gameServer.manager.rooms.get(first.data!.code)!
+    room.updatedAt = Date.now() - 6 * 60 * 60 * 1_000 - 1
+
+    const expired = nextEvent<{ code: string }>(board, 'party:board:expired')
+    gameServer.runMaintenance()
+    expect(await expired).toEqual({ code: first.data!.code })
+    expect(gameServer.manager.rooms.has(first.data!.code)).toBe(false)
+    const serverSocket = gameServer.io.sockets.sockets.get(board.id!)!
+    expect(serverSocket.data.connectionRole).toBeUndefined()
+    expect(serverSocket.data.roomCode).toBeUndefined()
+
+    const second = await emitAck<PartyBoardCredentials>(board, 'party:board:create', makeBoardRequest())
+    expect(second.ok).toBe(true)
+    expect(second.data!.code).not.toBe(first.data!.code)
+  })
+
+  it('keeps production socket logs free of credentials and user identifiers', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    try {
+      gameServer = await createGameServer({
+        ...process.env,
+        NODE_ENV: 'production',
+        CLIENT_ORIGIN: 'http://localhost:5173',
+        REDIS_URL: '',
+        PARTY_MODE: 'public',
+        COMMIT_SHA: 'safe-build-version',
+      })
+      const port = await gameServer.listen(0)
+      const url = `http://127.0.0.1:${port}`
+      sockets.push(await connectedSocket(url), await connectedSocket(url), await connectedSocket(url))
+      const [board, player, attacker] = sockets
+      const request = makeBoardRequest()
+      const created = await emitAck<PartyBoardCredentials>(board, 'party:board:create', request)
+      const playerName = 'Sensitive Player Name'
+      const joined = await emitAck<RoomCredentials>(player, 'room:join', {
+        code: created.data!.code,
+        name: playerName,
+      })
+      const chatText = 'Sensitive private chat text'
+      await emitAck(player, 'room:chat:send', { clientMessageId: randomUUID(), text: chatText })
+      await emitAck(player, 'game:start', {})
+      await emitAck(attacker, 'party:board:reconnect', {
+        code: created.data!.code,
+        boardToken: randomBytes(32).toString('base64url'),
+      })
+
+      const logs = JSON.stringify([...warn.mock.calls, ...info.mock.calls])
+      for (const forbidden of [
+        request.requestId,
+        request.boardToken,
+        created.data!.code,
+        joined.data!.playerId,
+        joined.data!.token,
+        playerName,
+        chatText,
+        board.id!,
+        player.id!,
+        '127.0.0.1',
+      ]) expect(logs).not.toContain(forbidden)
+      expect(logs).toContain('safe-build-version')
+      expect(logs).toContain('correlationId')
+      expect(logs).toContain('socket_action_rejected')
+      expect(logs).toContain('party_board_created')
+    } finally {
+      for (const socket of sockets) socket.disconnect()
+      sockets.length = 0
+      await gameServer?.close()
+      gameServer = undefined
+      warn.mockRestore()
+      info.mockRestore()
+    }
   })
 })
 

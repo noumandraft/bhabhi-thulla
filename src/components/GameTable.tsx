@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type SVGProps } from 'react'
 import type { Socket } from 'socket.io-client'
-import { sortCards, suitSymbol, type ActivityItem, type Card as CardType, type ChatMode, type Reaction, type Suit } from '../../shared/game'
+import { sortCards, suitSymbol, type ActivityItem, type ChatMode, type Reaction, type Suit } from '../../shared/game'
 import type { Language, TFunction } from '../i18n'
 import type { Preferences } from '../preferences'
 import type { ClientPlayerView as Player, ClientRoomView, TableReaction } from '../protocol'
 import { emitWithAck } from '../socket'
 import { AccessibleDialog } from './AccessibleDialog'
+import { GameCard as PlayingCard, localizedSuit } from './game/GameCard'
 
 type IconProps = SVGProps<SVGSVGElement> & { size?: number }
 
@@ -22,6 +23,7 @@ const Help = (props: IconProps) => <Icon {...props}><circle cx="12" cy="12" r="9
 const History = (props: IconProps) => <Icon {...props}><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></Icon>
 const LogOut = (props: IconProps) => <Icon {...props}><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/><path d="M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/></Icon>
 const Message = (props: IconProps) => <Icon {...props}><path d="M21 15a4 4 0 0 1-4 4H8l-5 3 1.7-5A7 7 0 0 1 3 12V8a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></Icon>
+const Monitor = (props: IconProps) => <Icon {...props}><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></Icon>
 const MoreHorizontal = (props: IconProps) => <Icon {...props}><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></Icon>
 const Play = (props: IconProps) => <Icon {...props}><path d="m7 4 13 8L7 20z"/></Icon>
 const RotateCcw = (props: IconProps) => <Icon {...props}><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></Icon>
@@ -43,27 +45,6 @@ function isShareCancelled(error: unknown): boolean {
 
 function GameLogo() {
   return <div className="game-v2-logo" aria-label="Bhabhi Thulla"><span className="game-v2-logo__cards" aria-hidden="true"><i>♠</i><i>♥</i></span><span><b>Bhabhi</b><strong>THULLA</strong></span></div>
-}
-
-function CardFace({ card }: { card: CardType }) {
-  return <><span className="game-card__corner"><b>{card.rank}</b><i>{suitSymbol[card.suit]}</i></span><span className="game-card__suit" aria-hidden="true">{suitSymbol[card.suit]}</span><span className="game-card__corner game-card__corner--bottom" aria-hidden="true"><b>{card.rank}</b><i>{suitSymbol[card.suit]}</i></span></>
-}
-
-function localizedSuit(t: TFunction, suit: Suit): string {
-  if (suit === 'spades') return t('suitSpades')
-  if (suit === 'hearts') return t('suitHearts')
-  if (suit === 'diamonds') return t('suitDiamonds')
-  return t('suitClubs')
-}
-
-function PlayingCard({ card, t, interactive = false, selectable = false, selected = false, disabled = false, unavailable = false, onClick, small = false }: {
-  card: CardType; t: TFunction; interactive?: boolean; selectable?: boolean; selected?: boolean; disabled?: boolean; unavailable?: boolean; onClick?: () => void; small?: boolean
-}) {
-  const className = `game-card ${card.suit === 'hearts' || card.suit === 'diamonds' ? 'game-card--red' : ''} ${selectable ? 'game-card--selectable' : ''} ${unavailable ? 'is-unavailable' : ''} ${selected ? 'is-selected' : ''} ${small ? 'game-card--small' : ''}`
-  const cardName = t('cardName', { rank: card.rank, suit: localizedSuit(t, card.suit) })
-  const label = selected ? t('selectedCardLabel', { card: cardName }) : cardName
-  if (!interactive) return <div className={className} role="img" aria-label={label}><CardFace card={card}/></div>
-  return <button type="button" className={className} disabled={disabled} onClick={onClick} aria-label={label} aria-pressed={selectable ? selected : undefined}><CardFace card={card}/></button>
 }
 
 function useCountdown(endsAt: number | null, active: boolean, expectedDuration: number, interval = 200) {
@@ -531,7 +512,7 @@ export default function GameTable({ room, socket, connected, t, language, chatSu
   async function takeRightHand() { if (!game.canTakeRightHand || !takeTarget || !canAct) return; setTaking(true); const response = await emitWithAck(socket, 'game:take-right', {}); setTaking(false); setTakeConfirmOpen(false); if (!response.ok) onToast(response.error ?? t('takeFailed'), 'error'); else onToast(t('takeSuccess', { name: takeTarget.name }), 'success') }
   async function copyRoomCode() { try { await navigator.clipboard.writeText(room.code); onToast(t('roomCodeCopied'), 'success') } catch { onToast(`${t('roomCode')}: ${room.code}`, 'info') } }
   async function shareInvite() {
-    const inviteUrl = `${window.location.origin}${window.location.pathname}?room=${room.code}`
+    const inviteUrl = `${window.location.origin}${window.location.pathname}?room=${room.code}${room.mode === 'party' ? '&mode=party' : ''}`
     const message = t('inviteMessage', { url: inviteUrl })
     try {
       if (navigator.share) await navigator.share({ title: 'Bhabhi Thulla', text: message, url: inviteUrl })
@@ -587,7 +568,7 @@ export default function GameTable({ room, socket, connected, t, language, chatSu
     : game.firstTrick ? t('waitingAce') : t('tableClear')
   const settingsButtonLabel = preferencesBlocked ? t('settingsUnavailable') : t('settings')
 
-  return <main className={`game-v2-shell ${isFinished ? 'is-finished' : ''} ${me.waitingForNextRound ? 'is-waiting' : ''} ${isResolving ? 'is-resolving' : ''} ${isReconnectPause ? 'is-reconnecting' : ''} ${canReviewExplanation ? 'has-explanation' : ''}`}>
+  return <main className={`game-v2-shell ${room.mode === 'party' ? 'is-party-controller' : ''} ${isFinished ? 'is-finished' : ''} ${me.waitingForNextRound ? 'is-waiting' : ''} ${isResolving ? 'is-resolving' : ''} ${isReconnectPause ? 'is-reconnecting' : ''} ${canReviewExplanation ? 'has-explanation' : ''}`}>
     {!isFinished ? <a className="game-v2-skip" href={me.waitingForNextRound ? '#game-v2-waiting-player' : '#game-v2-hand'}>{me.waitingForNextRound ? t('watchingTable') : t('skipToHand')}</a> : null}
     <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{queueAnnouncement}</span>
     <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{reconnectAnnouncement}</span>
@@ -595,6 +576,7 @@ export default function GameTable({ room, socket, connected, t, language, chatSu
       <GameLogo/>
       <button className="game-v2-room" type="button" onClick={() => void copyRoomCode()} aria-label={t('copyRoomCode', { code: room.code })}><span>{t('room')}</span><b>{room.code}</b><Copy size={16}/></button>
       <div className="game-v2-header__actions">
+        {room.mode === 'party' ? <span className={`game-v2-party-board-status ${room.partyBoardConnected ? 'is-online' : ''}`} role="status" title={room.partyBoardConnected ? t('sharedScreenConnected') : t('sharedScreenDisconnected')}><Monitor size={17}/><span>{room.partyBoardConnected ? t('sharedScreenConnected') : t('sharedScreenDisconnected')}</span></span> : null}
         <span className={`game-v2-connection ${connected ? 'is-online' : ''}`} role="status" aria-label={connected ? t('connectedServer') : t('reconnectingServer')}>{connected ? <Wifi size={17}/> : <WifiOff size={17}/>}<span>{connected ? t('live') : t('reconnecting')}</span></span>
         <div className="game-v2-header-secondary">
           <IconButton label={settingsButtonLabel} disabled={preferencesBlocked} onClick={openPreferences}><Settings size={21}/></IconButton>

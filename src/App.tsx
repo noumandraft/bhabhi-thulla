@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode, type SVGProps } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode, type SVGProps } from 'react'
 import { io, type Socket } from 'socket.io-client'
 import {
   PROTOCOL_VERSION,
@@ -6,6 +6,7 @@ import {
   type ChatHistory,
   type ChatMessage,
   type ChatMode,
+  type PartyAvailability,
   type Reaction,
   type RoomCredentials,
   type ServerCapability,
@@ -20,6 +21,7 @@ import { chatAttemptFor, countUnreadChatMessages, mergeChatMessages, reconcileCh
 import { languageDirection, translate, type Language, type TFunction } from './i18n'
 import { usePreferences } from './preferences'
 import { DEFAULT_ROOM_SETTINGS, roomSettings, type ClientPlayerView, type ClientRoomView, type TableReaction } from './protocol'
+import { makePartyBoardQaFixture } from './partyQaFixtures'
 import { makeQaRoom } from './qaFixtures'
 import { emitWithAck } from './socket'
 
@@ -38,11 +40,13 @@ const Clock3 = (props: IconProps) => <Icon {...props}><circle cx="12" cy="12" r=
 const Copy = (props: IconProps) => <Icon {...props}><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></Icon>
 const Crown = (props: IconProps) => <Icon {...props}><path d="m3 6 4 5 5-7 5 7 4-5-2 12H5z"/><path d="M5 21h14"/></Icon>
 const LogOut = (props: IconProps) => <Icon {...props}><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/><path d="M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/></Icon>
+const Monitor = (props: IconProps) => <Icon {...props}><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></Icon>
 const MoreHorizontal = (props: IconProps) => <Icon {...props}><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></Icon>
 const Info = (props: IconProps) => <Icon {...props}><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></Icon>
 const Play = (props: IconProps) => <Icon {...props}><path d="m7 4 13 8L7 20z"/></Icon>
 const Share2 = (props: IconProps) => <Icon {...props}><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/></Icon>
 const ShieldCheck = (props: IconProps) => <Icon {...props}><path d="M12 3 4 6v5c0 5 3.4 8.5 8 10 4.6-1.5 8-5 8-10V6z"/><path d="m8.5 12 2.2 2.2 4.8-5"/></Icon>
+const Smartphone = (props: IconProps) => <Icon {...props}><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></Icon>
 const Trash = (props: IconProps) => <Icon {...props}><path d="M3 6h18M8 6V4h8v2M6 6l1 15h10l1-15M10 11v5M14 11v5"/></Icon>
 const Users = (props: IconProps) => <Icon {...props}><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/></Icon>
 const Wifi = (props: IconProps) => <Icon {...props}><path d="M5 12.6a10 10 0 0 1 14 0M2 9.3a15 15 0 0 1 20 0M8.5 16a5 5 0 0 1 7 0"/><circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/></Icon>
@@ -52,6 +56,7 @@ const X = (props: IconProps) => <Icon {...props}><path d="M18 6 6 18M6 6l12 12"/
 const DEFAULT_SERVER = window.location.hostname === 'localhost' ? 'http://localhost:3001' : 'https://bhabhi-thulla-server.onrender.com'
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || DEFAULT_SERVER
 const QA_FIXTURES_ENABLED = import.meta.env.DEV || import.meta.env.VITE_ENABLE_QA_FIXTURES === 'true'
+const PartyBoardExperience = lazy(() => import('./components/party/PartyBoard').then((module) => ({ default: module.PartyBoardExperience })))
 const LANGUAGES: Language[] = ['en', 'roman', 'ur']
 export type ToastTone = 'success' | 'error' | 'info'
 type ToastNotice = { message: string; tone: ToastTone }
@@ -93,7 +98,11 @@ function getSavedCredentials(code: string): RoomCredentials | null {
 
 function saveCredentials(credentials: RoomCredentials): void {
   localStorage.setItem(`thulla:seat:${credentials.code}`, JSON.stringify(credentials))
-  window.history.replaceState({}, '', `${window.location.pathname}?room=${credentials.code}`)
+  const url = new URL(window.location.href)
+  url.searchParams.delete('board')
+  url.searchParams.set('room', credentials.code)
+  if (url.searchParams.get('mode') !== 'party') url.searchParams.delete('mode')
+  window.history.replaceState({}, '', `${url.pathname}?${url.searchParams.toString()}${url.hash}`)
 }
 
 function getSavedLanguage(): Language {
@@ -168,16 +177,27 @@ function RulesModal({ t, onClose }: { t: TFunction; onClose: () => void }) {
   </AccessibleDialog>
 }
 
-function Landing({ socket, connected, inviteCode, t, language, onLanguage, onEntered, onOpenRules, onOpenTutorial, onToast }: {
+type LandingExperience = 'choose' | 'online' | 'party-entry' | 'party-phone'
+
+function Landing({ socket, connected, inviteCode, partySupported, partyDiscoverable, t, language, onLanguage, onEntered, onOpenPartyBoard, onOpenRules, onOpenTutorial, onToast }: {
   socket: Socket; connected: boolean; inviteCode: string; t: TFunction; language: Language; onLanguage: (language: Language) => void
-  onEntered: (credentials: RoomCredentials) => void; onOpenRules: () => void; onOpenTutorial: () => void; onToast: ShowToast
+  partySupported: boolean; partyDiscoverable: boolean; onEntered: (credentials: RoomCredentials) => void; onOpenPartyBoard: () => void; onOpenRules: () => void; onOpenTutorial: () => void; onToast: ShowToast
 }) {
+  const requestedParty = useMemo(() => new URLSearchParams(window.location.search).get('mode') === 'party', [])
+  const [experience, setExperience] = useState<LandingExperience>(() => inviteCode ? requestedParty ? 'party-phone' : 'online' : 'online')
   const [mode, setMode] = useState<'create' | 'join'>(inviteCode ? 'join' : 'create')
   const [name, setName] = useState(() => localStorage.getItem('thulla:name') ?? '')
   const [code, setCode] = useState(inviteCode)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [wakeElapsed, setWakeElapsed] = useState(0)
+  const discoveryAppliedRef = useRef(Boolean(inviteCode) || partyDiscoverable)
+
+  useEffect(() => {
+    if (discoveryAppliedRef.current || inviteCode || !partyDiscoverable) return
+    discoveryAppliedRef.current = true
+    setExperience('choose')
+  }, [inviteCode, partyDiscoverable])
 
   useEffect(() => {
     if (connected) { setWakeElapsed(0); return }
@@ -193,7 +213,8 @@ function Landing({ socket, connected, inviteCode, t, language, onLanguage, onEnt
     setLoading(true)
     const cleanName = name.trim() || (createPractice ? t('player') : '')
     localStorage.setItem('thulla:name', cleanName)
-    const response = mode === 'create' || createPractice
+    const shouldCreate = createPractice || (experience === 'online' && mode === 'create')
+    const response = shouldCreate
       ? await emitWithAck<RoomCredentials>(socket, 'room:create', { name: cleanName })
       : await emitWithAck<RoomCredentials>(socket, 'room:join', { name: cleanName, code })
     if (!response.ok || !response.data) {
@@ -215,6 +236,7 @@ function Landing({ socket, connected, inviteCode, t, language, onLanguage, onEnt
   async function submit(event: FormEvent) { event.preventDefault(); await enterRoom(false) }
 
   function focusCreateRoom() {
+    setExperience('online')
     setMode('create')
     setError('')
     window.requestAnimationFrame(() => {
@@ -225,8 +247,15 @@ function Landing({ socket, connected, inviteCode, t, language, onLanguage, onEnt
     })
   }
 
+  function chooseExperience(next: LandingExperience) {
+    setExperience(next)
+    setError('')
+    if (next === 'party-phone') setMode('join')
+    window.requestAnimationFrame(() => document.getElementById('play-bhabhi-thulla')?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
+  }
+
   return <>
-    <main className="landing-shell">
+    <main className={`landing-shell ${experience === 'party-entry' || experience === 'party-phone' ? 'landing-shell--party-entry' : ''}`}>
       <nav className="landing-nav"><Logo compact/><div className="landing-nav__actions"><LanguageSelect language={language} onChange={onLanguage} t={t}/><button className="text-button" type="button" onClick={onOpenRules}><BookOpen size={18}/> {t('howToPlay')}</button></div></nav>
       <div className="landing-grid">
       <section className="hero-copy">
@@ -251,16 +280,34 @@ function Landing({ socket, connected, inviteCode, t, language, onLanguage, onEnt
       </section>
       <section className="join-card" id="play-bhabhi-thulla" aria-labelledby="join-heading">
         <div className="connection-label" data-connected={connected}><span>{connected ? <Wifi size={16}/> : <WifiOff size={16}/>} {connected ? t('serverReady') : wakeElapsed >= 8 ? t('wakingServerElapsed', { count: wakeElapsed }) : t('wakingServer')}</span>{!connected && wakeElapsed >= 8 ? <button type="button" onClick={() => { socket.disconnect(); socket.connect(); setWakeElapsed(0) }}>{t('retryConnection')}</button> : null}</div>
-        <span className="eyebrow">{t('pullUpChair')}</span><h2 id="join-heading">{mode === 'create' ? t('startPrivate') : t('joinFriends')}</h2>
-        <div className="mode-tabs" aria-label={t('chooseRoomAction')}><button type="button" aria-pressed={mode === 'create'} onClick={() => { setMode('create'); setError('') }}>{t('createRoom')}</button><button type="button" aria-pressed={mode === 'join'} onClick={() => { setMode('join'); setError('') }}>{t('joinRoom')}</button></div>
-        <form onSubmit={submit}>
-          <label htmlFor="player-name">{t('yourName')}</label><input id="player-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={20} minLength={2} autoComplete="nickname" dir="auto" placeholder="e.g. Hamza" required/>
-          {mode === 'join' ? <><label htmlFor="room-code">{t('roomCode')}</label><input id="room-code" className="code-input" value={code} onChange={(event) => setCode(event.target.value.replace(/[^a-z0-9]/gi, '').toUpperCase().slice(0, 5))} maxLength={5} placeholder="ABCDE" autoCapitalize="characters" autoComplete="off" autoCorrect="off" spellCheck={false} enterKeyHint="go" inputMode="text" dir="ltr" required/></> : null}
-          {error ? <p className="form-error" role="alert">{error}</p> : null}
-          <button className="button button--primary button--wide" type="submit" disabled={loading || !connected}>{loading ? <><span className="spinner"/> {t('takingSeat')}</> : <>{mode === 'create' ? t('createPrivateRoom') : t('joinTable')} <ChevronRight size={20}/></>}</button>
-        </form>
-        <div className="practice-actions"><button className="button button--secondary button--wide" type="button" disabled={loading || !connected} onClick={() => void enterRoom(true)}><Bot size={20}/> {t('practiceBots')}</button><button className="text-button" type="button" onClick={onOpenTutorial}><BookOpen size={18}/> {t('interactiveTutorial')}</button></div>
-        <p className="privacy-note">{t('privacy')}</p>
+        {experience === 'choose' ? <div className="play-mode-panel">
+          <span className="eyebrow">{t('pullUpChair')}</span><h2 id="join-heading">{t('choosePlayMode')}</h2><p className="play-mode-panel__intro">{t('choosePlayModeBody')}</p>
+          <div className="play-mode-options">
+            <button type="button" onClick={() => chooseExperience('online')}><span className="play-mode-options__icon"><Users size={25}/></span><span><b>{t('onlineMode')}</b><small>{t('onlineModeBody')}</small></span><ChevronRight size={21}/></button>
+            <button className="is-party" type="button" onClick={() => chooseExperience('party-entry')}><i>{t('newFeature')}</i><span className="play-mode-options__icon"><Monitor size={25}/></span><span><b>{t('partyMode')}</b><small>{t('partyModeBody')}</small></span><ChevronRight size={21}/></button>
+          </div>
+          <button className="text-button play-mode-panel__tutorial" type="button" onClick={onOpenTutorial}><BookOpen size={18}/> {t('interactiveTutorial')}</button>
+        </div> : null}
+        {experience === 'party-entry' ? <div className="play-mode-panel party-entry-panel">
+          <button className="join-card__back" type="button" onClick={() => chooseExperience('choose')}><ChevronRight size={18}/> {t('backToModes')}</button>
+          <span className="eyebrow">{t('partyMode')}</span><h2 id="join-heading">{t('partySetup')}</h2><p className="play-mode-panel__intro">{t('partySetupBody')}</p>
+          <div className="party-role-options">
+            <button type="button" disabled={!partySupported} onClick={onOpenPartyBoard}><Monitor size={28}/><span><b>{t('openSharedBoard')}</b><small>{t('openSharedBoardBody')}</small></span><ChevronRight size={21}/></button>
+            <button type="button" onClick={() => chooseExperience('party-phone')}><Smartphone size={28}/><span><b>{t('joinOnPhone')}</b><small>{t('joinOnPhoneBody')}</small></span><ChevronRight size={21}/></button>
+          </div>
+        </div> : null}
+        {experience === 'online' || experience === 'party-phone' ? <>
+          {partyDiscoverable || experience === 'party-phone' ? <button className="join-card__back" type="button" onClick={() => chooseExperience(experience === 'party-phone' ? 'party-entry' : 'choose')}><ChevronRight size={18}/> {t('backToModes')}</button> : null}
+          <span className="eyebrow">{experience === 'party-phone' ? t('partyController') : t('pullUpChair')}</span><h2 id="join-heading">{experience === 'party-phone' ? t('partyJoinTitle') : mode === 'create' ? t('startPrivate') : t('joinFriends')}</h2>
+          {experience === 'party-phone' ? <p className="play-mode-panel__intro">{t('partyJoinBody')}</p> : <div className="mode-tabs" aria-label={t('chooseRoomAction')}><button type="button" aria-pressed={mode === 'create'} onClick={() => { setMode('create'); setError('') }}>{t('createRoom')}</button><button type="button" aria-pressed={mode === 'join'} onClick={() => { setMode('join'); setError('') }}>{t('joinRoom')}</button></div>}
+          <form onSubmit={submit}>
+            <label htmlFor="player-name">{t('yourName')}</label><input id="player-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={20} minLength={2} autoComplete="nickname" dir="auto" placeholder="e.g. Hamza" required/>
+            {mode === 'join' || experience === 'party-phone' ? <><label htmlFor="room-code">{t('roomCode')}</label><input id="room-code" className="code-input" value={code} onChange={(event) => setCode(event.target.value.replace(/[^a-z0-9]/gi, '').toUpperCase().slice(0, 5))} maxLength={5} placeholder="ABCDE" autoCapitalize="characters" autoComplete="off" autoCorrect="off" spellCheck={false} enterKeyHint="go" inputMode="text" dir="ltr" required/></> : null}
+            {error ? <p className="form-error" role="alert">{error}</p> : null}
+            <button className="button button--primary button--wide" type="submit" disabled={loading || !connected}>{loading ? <><span className="spinner"/> {t('takingSeat')}</> : <>{experience === 'party-phone' ? t('joinOnPhone') : mode === 'create' ? t('createPrivateRoom') : t('joinTable')} <ChevronRight size={20}/></>}</button>
+          </form>
+          {experience === 'party-phone' ? <p className="party-phone-privacy"><ShieldCheck size={18}/>{t('partyPhonePrivacy')}</p> : <><div className="practice-actions"><button className="button button--secondary button--wide" type="button" disabled={loading || !connected} onClick={() => void enterRoom(true)}><Bot size={20}/> {t('practiceBots')}</button><button className="text-button" type="button" onClick={onOpenTutorial}><BookOpen size={18}/> {t('interactiveTutorial')}</button></div><p className="privacy-note">{t('privacy')}</p></>}
+        </> : null}
       </section>
       </div>
       <LandingSeoContent onCreateRoom={focusCreateRoom} onPractice={() => void enterRoom(true)} onOpenRules={onOpenRules} onOpenTutorial={onOpenTutorial}/>
@@ -294,7 +341,7 @@ function Lobby({ room, socket, t, language, chatSupported, tableTalkControl, onL
   const me = room.players.find((player) => player.isYou)!
   const settings = roomSettings(room)
   const connectedCount = room.players.filter((player) => player.connected || player.isBot).length
-  const inviteUrl = `${window.location.origin}${window.location.pathname}?room=${room.code}`
+  const inviteUrl = `${window.location.origin}${window.location.pathname}?room=${room.code}${room.mode === 'party' ? '&mode=party' : ''}`
   const scores = room.session?.scores ?? []
 
   async function act(event: string, payload: unknown, fallback: string) {
@@ -315,11 +362,12 @@ function Lobby({ room, socket, t, language, chatSupported, tableTalkControl, onL
   const participants = room.players.filter((player) => player.isBot || player.connected)
   const allReady = participants.length >= room.minPlayers && participants.every((player) => player.isBot || player.ready)
 
-  return <main className="lobby-shell">
+  return <main className={`lobby-shell ${room.mode === 'party' ? 'lobby-shell--party-controller' : ''}`}>
     <header className="app-header"><Logo compact/><div className="header-actions"><LanguageSelect language={language} onChange={onLanguage} t={t}/>{tableTalkControl ? <div className="app-header__table-talk">{tableTalkControl}</div> : null}<div className="header-actions__secondary"><IconButton label={t('howToPlay')} onClick={onOpenRules}><BookOpen size={20}/></IconButton><IconButton label={t('leaveTable')} onClick={onLeave}><LogOut size={20}/></IconButton></div><HeaderOverflow t={t} onOpenRules={onOpenRules} onLeave={onLeave}/></div></header>
     <section className="lobby-card lobby-card--expanded">
       <div className="lobby-card__intro"><span className="eyebrow">{t('pullUpChair')}</span><h1>{t('waitingGang')}</h1><p>{t('lobbyDescription')}</p></div>
       <button className="room-code" type="button" onClick={() => void copyInvite()} aria-label={t('copyInviteRoom', { code: room.code })}><span>{t('roomCode')}</span><b dir="ltr">{room.code}</b><Copy size={19}/></button>
+      {room.mode === 'party' ? <div className={`party-controller-notice ${room.partyBoardConnected ? 'is-connected' : 'is-disconnected'}`} role="status"><Monitor size={21}/><div><b>{t('partyController')}</b><span>{room.partyBoardConnected ? t('sharedScreenConnected') : t('sharedScreenDisconnected')}</span></div></div> : null}
       <div className="seat-progress" role="progressbar" aria-label={t('seatsFilled', { count: connectedCount, total: room.maxPlayers })} aria-valuemin={0} aria-valuemax={room.maxPlayers} aria-valuenow={connectedCount} aria-valuetext={t('seatsFilled', { count: connectedCount, total: room.maxPlayers })}>{Array.from({ length: room.maxPlayers }, (_, index) => <i key={index} className={index < connectedCount ? 'is-filled' : ''}/>)}</div>
       <p className="lobby-hint"><Users size={17}/>{connectedCount < 3 ? t('needPlayers', { count: 3 - connectedCount }) : allReady ? t('readyToDeal') : t('needReady')}</p>
       <div className="lobby-actions">
@@ -357,6 +405,7 @@ export default function App() {
   const credentialsRef = useRef(credentials)
   const [room, setRoom] = useState<ClientRoomView | null>(null)
   const qaRoom = useMemo(() => QA_FIXTURES_ENABLED ? makeQaRoom(new URLSearchParams(window.location.search).get('qa')) : null, [])
+  const partyQaFixture = useMemo(() => QA_FIXTURES_ENABLED ? makePartyBoardQaFixture(new URLSearchParams(window.location.search).get('partyQa')) : null, [])
   const [connected, setConnected] = useState(false)
   const [reconnecting, setReconnecting] = useState(Boolean(initialCredentials))
   const [restoreElapsed, setRestoreElapsed] = useState(0)
@@ -366,6 +415,8 @@ export default function App() {
   const [toast, setToast] = useState<ToastNotice | null>(null)
   const [reaction, setReaction] = useState<TableReaction | null>(null)
   const [serverCapabilities, setServerCapabilities] = useState<ServerCapability[]>([])
+  const [partyAvailability, setPartyAvailability] = useState<PartyAvailability>('off')
+  const [partyBoardOpen, setPartyBoardOpen] = useState(() => Boolean(new URLSearchParams(window.location.search).get('board')) || Boolean(partyQaFixture))
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const chatMessagesRef = useRef<ChatMessage[]>([])
   const chatEpochRef = useRef<string | null>(null)
@@ -416,7 +467,7 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [displayedRoom, reconnecting])
   useEffect(() => {
-    if (qaRoom) {
+    if (qaRoom || partyQaFixture) {
       // Deterministic visual fixtures do not need a live Socket.IO connection.
       // Avoid opening a fresh connection on every QA viewport navigation.
       setConnected(true)
@@ -443,11 +494,21 @@ export default function App() {
         rejectProtocol()
         return
       }
-      setServerCapabilities((hello?.capabilities ?? []).filter((capability): capability is ServerCapability => capability === 'chat-v1'))
+      setServerCapabilities((hello?.capabilities ?? []).filter(
+        (capability): capability is ServerCapability => capability === 'chat-v1' || capability === 'party-v1',
+      ))
+      setPartyAvailability(hello?.partyMode === 'beta' || hello?.partyMode === 'public' ? hello.partyMode : 'off')
     }
     const onState = (state: ClientRoomView) => {
       if (String(state.protocolVersion) !== PROTOCOL_VERSION) { rejectProtocol(state.code); return }
-      setRoom({ ...state, settings: { ...DEFAULT_ROOM_SETTINGS, ...state.settings } })
+      setRoom({
+        ...state,
+        revision: Number.isSafeInteger(state.revision) && state.revision >= 0 ? state.revision : 0,
+        serverNow: Number.isFinite(state.serverNow) ? state.serverNow : Date.now(),
+        mode: state.mode === 'party' ? 'party' : 'online',
+        partyBoardConnected: state.partyBoardConnected === true,
+        settings: { ...DEFAULT_ROOM_SETTINGS, ...state.settings },
+      })
     }
     const onReaction = (next: TableReaction) => setReaction(next)
     const onChatMessage = (message: ChatMessage) => {
@@ -476,7 +537,7 @@ export default function App() {
     socket.on('connect', restoreSeat); socket.on('disconnect', onDisconnect); socket.on('server:hello', onHello); socket.on('room:state', onState); socket.on('room:reaction', onReaction); socket.on('room:chat:message', onChatMessage); socket.on('room:kicked', onKicked)
     if (socket.connected) void restoreSeat(); else socket.connect()
     return () => { socket.off('connect', restoreSeat); socket.off('disconnect', onDisconnect); socket.off('server:hello', onHello); socket.off('room:state', onState); socket.off('room:reaction', onReaction); socket.off('room:chat:message', onChatMessage); socket.off('room:kicked', onKicked); socket.disconnect() }
-  }, [clearSeat, qaRoom, socket])
+  }, [clearSeat, partyQaFixture, qaRoom, socket])
   useEffect(() => { chatMessagesRef.current = chatMessages }, [chatMessages])
   useEffect(() => {
     const code = displayedRoom?.code ?? null
@@ -733,10 +794,16 @@ export default function App() {
     onMessagesRead={(sequence) => setLastReadChatSequence((current) => Math.max(current, sequence))}
   /> : null
 
+  const partySupported = serverCapabilities.includes('party-v1')
+  const partyBetaRequested = new URLSearchParams(window.location.search).get('partyBeta') === '1'
+  const partyDiscoverable = partySupported && (partyAvailability === 'public' || partyAvailability === 'beta' && partyBetaRequested)
+
+  if (partyBoardOpen) return <Suspense fallback={<main className="loading-screen"><Logo/><span className="spinner spinner--large"/><p>{t('openingPartyBoard')}</p></main>}><PartyBoardExperience serverUrl={SERVER_URL} language={language} onLanguage={setLanguage} t={t} fixture={partyQaFixture} onExit={() => setPartyBoardOpen(false)}/></Suspense>
+
   if (reconnecting && !displayedRoom) return <main className="loading-screen"><Logo/><span className="spinner spinner--large"/><div className="loading-screen__copy"><p>{t('findingSeat')}</p>{restoreElapsed >= 8 ? <small>{t('findingSeatElapsed', { count: restoreElapsed })}</small> : null}</div>{restoreElapsed >= 12 ? <div className="loading-screen__actions"><button className="button button--primary" type="button" onClick={() => { socket.disconnect(); socket.connect(); setRestoreElapsed(0) }}>{t('retryConnection')}</button><button className="button button--secondary" type="button" onClick={() => clearSeat(credentials?.code, t('seatRestoreAbandoned'))}>{t('forgetSavedSeat')}</button></div> : null}</main>
 
   return <>
-    {!displayedRoom ? <><Landing socket={socket} connected={connected} inviteCode={inviteCode} t={t} language={language} onLanguage={setLanguage} onEntered={entered} onOpenRules={openRules} onOpenTutorial={openTutorial} onToast={showToast}/>{entryError ? <div className="entry-banner" role="alert">{entryError}</div> : null}</> : displayedRoom.status === 'lobby' ? <Lobby room={displayedRoom} socket={socket} t={t} language={language} chatSupported={chatSupported} tableTalkControl={tableTalkControl} onLanguage={setLanguage} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/> : <GameTable room={displayedRoom} socket={socket} connected={connected} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} preferences={preferences} onPreference={updatePreference} liveReaction={visibleReaction} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/>}
+    {!displayedRoom ? <><Landing socket={socket} connected={connected} inviteCode={inviteCode} partySupported={partySupported} partyDiscoverable={partyDiscoverable} t={t} language={language} onLanguage={setLanguage} onEntered={entered} onOpenPartyBoard={() => setPartyBoardOpen(true)} onOpenRules={openRules} onOpenTutorial={openTutorial} onToast={showToast}/>{entryError ? <div className="entry-banner" role="alert">{entryError}</div> : null}</> : displayedRoom.status === 'lobby' ? <Lobby room={displayedRoom} socket={socket} t={t} language={language} chatSupported={chatSupported} tableTalkControl={tableTalkControl} onLanguage={setLanguage} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/> : <GameTable room={displayedRoom} socket={socket} connected={connected} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} preferences={preferences} onPreference={updatePreference} liveReaction={visibleReaction} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/>}
     {displayedRoom?.status === 'lobby' && visibleReaction && !preferences.reactionsMuted ? <div className={`table-talk__lobby-reaction ${tableTalkOpen ? 'is-drawer-open' : ''}`} role="status" aria-live="polite"><b><bdi dir="auto">{visibleReaction.playerId === displayedRoom.yourPlayerId ? t('you') : visibleReaction.playerName}</bdi></b><span>{reactionLabel(visibleReaction.reaction, t)}</span></div> : null}
     {displayedRoom?.status !== 'lobby' ? tableTalkControl : null}
     {!auxiliaryOverlaysBlocked && rulesOpen ? <RulesModal t={t} onClose={() => setRulesOpen(false)}/> : null}

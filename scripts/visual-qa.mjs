@@ -812,6 +812,21 @@ const partyDiagnosticsExpression = `(() => {
   const playerRects = [...document.querySelectorAll('.party-board .party-player')]
     .filter(rendered)
     .map((element) => element.getBoundingClientRect())
+  const radialSeats = [...document.querySelectorAll('.party-board__radial-seat')].filter(rendered)
+  const radialSeatRects = radialSeats.map((element) => element.getBoundingClientRect())
+  const radialSeatOverlaps = radialSeatRects.flatMap((first, firstIndex) => radialSeatRects
+    .slice(firstIndex + 1)
+    .map((second, secondOffset) => overlaps(first, second) ? [firstIndex, firstIndex + secondOffset + 1] : null)
+    .filter(Boolean))
+  const wasteRect = document.querySelector('.party-board__waste')?.getBoundingClientRect()
+  const directionRect = document.querySelector('.party-board__direction')?.getBoundingClientRect()
+  const orbitDistances = tableRect ? radialSeatRects.map((box) => {
+    const centerX = box.left + box.width / 2
+    const centerY = box.top + box.height / 2
+    const x = (centerX - (tableRect.left + tableRect.width / 2)) / (tableRect.width * .42)
+    const y = (centerY - (tableRect.top + tableRect.height / 2)) / (tableRect.height * .38)
+    return Math.hypot(x, y)
+  }) : []
   const qrImage = document.querySelector('.party-qr__image img')
   const main = document.querySelector('.party-board > main')
   const mainRect = main?.getBoundingClientRect()
@@ -839,6 +854,15 @@ const partyDiagnosticsExpression = `(() => {
     reactionOverlapsCards: cardRects.some((box) => overlaps(reactionRect, box)),
     reactionOverlapsStatus: overlaps(reactionRect, statusRect),
     reactionOverlapsPlayers: playerRects.some((box) => overlaps(reactionRect, box)),
+    radialSeatCount: radialSeats.length,
+    radialSeatIndices: radialSeats.map((element) => Number(element.getAttribute('data-seat-index'))),
+    radialSeatsOutsideTable: radialSeatRects.filter((box) => !inside(box, tableRect)).length,
+    radialSeatOverlaps,
+    radialSeatsOverlapCards: radialSeatRects.filter((seat) => cardRects.some((card) => overlaps(seat, card))).length,
+    radialSeatsOverlapStatus: radialSeatRects.filter((seat) => overlaps(seat, statusRect)).length,
+    radialSeatsOverlapWaste: radialSeatRects.filter((seat) => overlaps(seat, wasteRect)).length,
+    radialSeatsOverlapDirection: radialSeatRects.filter((seat) => overlaps(seat, directionRect)).length,
+    radialOrbitDeviation: orbitDistances.length ? Math.max(...orbitDistances.map((distance) => Math.abs(1 - distance))) : null,
     qrPresent: Boolean(qrImage),
     qrHasAlt: Boolean(qrImage?.getAttribute('alt')?.trim()),
     roomCodePresent: Boolean(document.querySelector('.party-board__code b[dir="ltr"]')),
@@ -1262,6 +1286,7 @@ try {
     { mode: 'reaction', name: 'reaction-rtl', language: 'ur', viewports: [[844, 390], [375, 667]] },
     { mode: 'offline', viewports: [[844, 390], [375, 667]] },
     { mode: 'expired', viewports: [[375, 667]] },
+    ...[3, 4, 5, 6, 7, 8].map((count) => ({ mode: `circle-${count}`, viewports: [[1280, 720], [844, 390]] })),
   ]
   const partyFixtureResults = {}
   for (const fixture of partyFixtureDefinitions) {
@@ -1287,11 +1312,23 @@ try {
       assert(result.soundToggleCount === 1, `${context} does not expose one accessible board-sound preference.`)
       assert(['active', 'pending', 'unsupported'].includes(result.wakeLockState), `${context} has no explicit Wake Lock state.`)
       if (width >= 640 && height <= 720) assert(!result.pageOverflowY, `${context} unexpectedly scrolls the shared-screen viewport.`)
-      if (['playing', 'many', 'resolving', 'reconnect', 'reaction', 'offline'].includes(fixture.mode)) {
+      if (['playing', 'many', 'resolving', 'reconnect', 'reaction', 'offline'].includes(fixture.mode) || fixture.mode.startsWith('circle-')) {
         assert(result.tableRendered && result.tableHorizontallyContained, `${context} does not contain the public card table.`)
         assert(!result.trickOverlapsStatus, `${context} overlaps the trick region and status panel.`)
         assert(result.cardsOutsideTable === 0, `${context} renders ${result.cardsOutsideTable} public cards outside the table.`)
         assert(result.cardsOverlapStatus === 0, `${context} covers the status panel with ${result.cardsOverlapStatus} public cards.`)
+      }
+      if (fixture.mode.startsWith('circle-')) {
+        const expectedPlayers = Number(fixture.mode.slice('circle-'.length))
+        assert(result.radialSeatCount === expectedPlayers, `${context} renders ${result.radialSeatCount} radial seats instead of ${expectedPlayers}.`)
+        assert(result.radialSeatIndices.join(',') === Array.from({ length: expectedPlayers }, (_, index) => index).join(','), `${context} does not preserve the player order around the ring.`)
+        assert(result.radialSeatsOutsideTable === 0, `${context} renders ${result.radialSeatsOutsideTable} seats outside the table.`)
+        assert(result.radialSeatOverlaps.length === 0, `${context} overlaps radial seats: ${JSON.stringify(result.radialSeatOverlaps)}.`)
+        assert(result.radialSeatsOverlapCards === 0, `${context} lets ${result.radialSeatsOverlapCards} seats cover played cards.`)
+        assert(result.radialSeatsOverlapStatus === 0, `${context} lets ${result.radialSeatsOverlapStatus} seats cover the status panel.`)
+        assert(result.radialSeatsOverlapWaste === 0, `${context} lets ${result.radialSeatsOverlapWaste} seats cover the waste pile.`)
+        assert(result.radialSeatsOverlapDirection === 0, `${context} lets ${result.radialSeatsOverlapDirection} seats cover the direction cue.`)
+        assert(result.radialOrbitDeviation !== null && result.radialOrbitDeviation < .035, `${context} does not keep every seat on the same ellipse (${result.radialOrbitDeviation}).`)
       }
       if (fixture.mode === 'lobby') {
         assert(result.qrPresent && result.qrHasAlt, `${context} is missing an accessible join QR code.`)

@@ -90,6 +90,27 @@ function useBoardClock(target: number | null | undefined, serverNow: number, dur
   return remaining
 }
 
+type RadialSeatStyle = CSSProperties & {
+  '--party-seat-x': string
+  '--party-seat-y': string
+  '--party-seat-x-compact': string
+  '--party-seat-y-compact': string
+  '--party-seat-order': number
+}
+
+function radialSeatStyle(index: number, total: number): RadialSeatStyle {
+  const angle = -Math.PI / 2 + (Math.PI * 2 * index) / Math.max(total, 1)
+  const cosine = Math.cos(angle)
+  const sine = Math.sin(angle)
+  return {
+    '--party-seat-x': `${(50 + cosine * 42).toFixed(3)}%`,
+    '--party-seat-y': `${(50 + sine * 38).toFixed(3)}%`,
+    '--party-seat-x-compact': `${(50 + cosine * 34).toFixed(3)}%`,
+    '--party-seat-y-compact': `${(50 + sine * 38).toFixed(3)}%`,
+    '--party-seat-order': index,
+  }
+}
+
 function PlayerTile({ player, current, loser, t }: { player: PartyBoardPlayerView; current?: boolean; loser?: boolean; t: TFunction }) {
   const initials = player.name.split(/\s+/).filter(Boolean).map((part) => part[0]).join('').slice(0, 2).toUpperCase()
   const state = loser ? t('partyBhabhi') : player.escaped ? t('safe') : player.reconnecting || !player.connected ? t('reconnecting') : player.waitingForNextRound ? t('watchingTable') : t('cards', { count: player.cardCount })
@@ -156,8 +177,6 @@ function BoardGame({ view, t }: { view: PartyBoardView; t: TFunction }) {
   const currentPlayer = view.players.find((player) => player.id === game.currentTurnId)
   const winner = view.players.find((player) => player.id === game.resolvedTrick?.winnerId)
   const last = view.players.find((player) => player.id === game.resolvedTrick?.lastPlayerId)
-  const leftPlayers = view.players.filter((_, index) => index % 2 === 0)
-  const rightPlayers = view.players.filter((_, index) => index % 2 === 1)
   const resultText = resolving && game.resolvedTrick?.kind === 'thulla'
     ? t('thullaResult', { last: last?.name ?? t('player'), winner: winner?.name ?? t('player') })
     : resolving && game.resolvedTrick?.kind === 'opening'
@@ -168,9 +187,19 @@ function BoardGame({ view, t }: { view: PartyBoardView; t: TFunction }) {
           ? t('waitingReconnect', { name: view.players.find((player) => player.id === game.reconnectPlayerId)?.name ?? t('player'), count: reconnectRemaining })
           : game.firstTrick ? t('openingEveryone') : currentPlayer ? t('playerThinking', { name: currentPlayer.name }) : t('tableClear')
 
-  return <main className={`party-board__game ${resolving ? 'is-resolving' : ''}`}>
-    <aside className="party-board__seat-column">{leftPlayers.map((player) => <PlayerTile key={player.id} player={player} current={player.id === game.currentTurnId} t={t}/>)}</aside>
-    <section className="party-board__table" aria-label={t('cardTable')}>
+  return <main className={`party-board__game ${resolving ? 'is-resolving' : ''}`} data-player-count={view.players.length}>
+    <section className="party-board__table" aria-label={t('cardTable')} data-seat-count={view.players.length}>
+      <div className="party-board__orbit" aria-hidden="true"/>
+      <div className="party-board__seat-ring" role="list" aria-label={`${t('partyPlayers')}: ${view.players.length}`}>
+        {view.players.map((player, index) => <div
+          className="party-board__radial-seat"
+          data-seat-index={index}
+          data-player-id={player.id}
+          role="listitem"
+          style={radialSeatStyle(index, view.players.length)}
+          key={player.id}
+        ><PlayerTile player={player} current={player.id === game.currentTurnId} t={t}/></div>)}
+      </div>
       <div className="party-board__direction"><span>{t('playDirection')}</span><b>→ {t('right')}</b></div>
       <div className="party-board__waste" aria-label={t('cardsInWaste', { count: game.wasteCount })}><span className="party-card-back"/><b>{game.wasteCount}</b><small>{t('waste')}</small></div>
       <div className="party-board__trick" aria-label={resolving ? t('completedTrickLabel') : t('currentTrickLabel')}>
@@ -178,7 +207,6 @@ function BoardGame({ view, t }: { view: PartyBoardView; t: TFunction }) {
       </div>
       <div className={`party-board__status ${game.resolvedTrick?.kind === 'thulla' ? 'is-thulla' : ''}`}><span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{resultText}</span><div><span>{resolving ? game.resolvedTrick?.kind === 'thulla' ? 'THULLA!' : t('trickComplete') : game.firstTrick ? t('openingTrick') : t('currentTurn')}</span><b>{resultText}</b></div>{resolving ? <time role="timer" aria-live="off" aria-label={t('secondsRemaining', { count: resolveRemaining })}>{resolveRemaining}s</time> : game.phase === 'turn' ? <time role="timer" aria-live="off" aria-label={t('secondsRemaining', { count: turnRemaining })}>{turnRemaining}s</time> : null}</div>
     </section>
-    <aside className="party-board__seat-column">{rightPlayers.map((player) => <PlayerTile key={player.id} player={player} current={player.id === game.currentTurnId} t={t}/>)}</aside>
   </main>
 }
 

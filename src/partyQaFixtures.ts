@@ -85,7 +85,8 @@ function base(count = 4): PartyBoardView {
 
 export function makePartyBoardQaFixture(mode: string | null): PartyBoardFixtureState | null {
   if (!mode) return null
-  const count = mode === 'many' ? 8 : 4
+  const circularCount = mode.match(/^circle-([3-8])$/)?.[1]
+  const count = circularCount ? Number(circularCount) : mode === 'many' ? 8 : 4
   const view = base(count)
   let reaction: ReactionEvent | null = null
   let connected = mode !== 'offline'

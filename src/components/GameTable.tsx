@@ -35,7 +35,7 @@ const Wifi = (props: IconProps) => <Icon {...props}><path d="M5 12.6a10 10 0 0 1
 const WifiOff = (props: IconProps) => <Icon {...props}><path d="m2 2 20 20M8.5 16a5 5 0 0 1 5.7-.9M5 12.6a10 10 0 0 1 4-2M2 9.3A15 15 0 0 1 6 7M14 7a15 15 0 0 1 8 2.3"/><circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/></Icon>
 const X = (props: IconProps) => <Icon {...props}><path d="M18 6 6 18M6 6l12 12"/></Icon>
 
-function IconButton({ label, onClick, children, className = '', disabled = false }: { label: string; onClick: () => void; children: ReactNode; className?: string; disabled?: boolean }) {
+export function IconButton({ label, onClick, children, className = '', disabled = false }: { label: string; onClick: () => void; children: ReactNode; className?: string; disabled?: boolean }) {
   return <button className={`game-v2-icon-button ${className}`.trim()} type="button" aria-label={label} title={label} disabled={disabled} onClick={onClick}>{children}</button>
 }
 
@@ -43,7 +43,7 @@ function isShareCancelled(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError'
 }
 
-function GameLogo() {
+export function GameLogo() {
   return <div className="game-v2-logo" aria-label="Bhabhi Thulla"><span className="game-v2-logo__cards" aria-hidden="true"><i>♠</i><i>♥</i></span><span><b>Bhabhi</b><strong>THULLA</strong></span></div>
 }
 
@@ -70,7 +70,7 @@ function useCountdown(endsAt: number | null, active: boolean, expectedDuration: 
   return { milliseconds, seconds: Math.max(0, Math.ceil(milliseconds / 1000)) }
 }
 
-function TurnClock({ endsAt, duration, t, alertForYou = false, sound = false, haptics = false }: { endsAt: number; duration: number; t: TFunction; alertForYou?: boolean; sound?: boolean; haptics?: boolean }) {
+export function TurnClock({ endsAt, duration, t, alertForYou = false, sound = false, haptics = false }: { endsAt: number; duration: number; t: TFunction; alertForYou?: boolean; sound?: boolean; haptics?: boolean }) {
   const { seconds } = useCountdown(endsAt, true, duration, 250)
   const [announcement, setAnnouncement] = useState('')
   const announced = useRef(new Set<number>())
@@ -147,7 +147,7 @@ function MatchActivity({ items, players, open, onToggle, t }: { items: ActivityI
   return <><button className="game-v2-log-toggle" type="button" onClick={onToggle} aria-expanded={open} aria-controls="match-activity"><History size={17}/> {t('matchLog')}</button><aside id="match-activity" className={`game-v2-activity ${open ? 'is-open' : ''}`} aria-label={t('matchLog')} hidden={!open} onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); onToggle() } }}><div><b>{t('matchLog')}</b><button ref={closeRef} type="button" onClick={onToggle} aria-label={t('close')}><X size={17}/></button></div>{items.length ? items.map((item) => <p key={item.id} data-tone={item.tone}>{activityText(item, players, t)}</p>) : <p>{t('noMoves')}</p>}</aside></>
 }
 
-function TakeHandDialog({ target, taking, activeCount, t, onCancel, onConfirm }: { target: Player; taking: boolean; activeCount: number; t: TFunction; onCancel: () => void; onConfirm: () => void }) {
+export function TakeHandDialog({ target, taking, activeCount, t, onCancel, onConfirm }: { target: Player; taking: boolean; activeCount: number; t: TFunction; onCancel: () => void; onConfirm: () => void }) {
   return <AccessibleDialog labelId="take-v2-title" className="game-v2-take-sheet" onClose={onCancel}><span className="game-v2-take-sheet__handle" aria-hidden="true"/><span className="game-v2-take-sheet__icon"><HandCards size={29}/></span><span className="game-v2-eyebrow">{t('rightHandRule')}</span><h2 id="take-v2-title">{t('takeQuestion', { name: target.name, count: target.cardCount })}</h2><p>{t('takeExplanation', { name: target.name })}</p>{activeCount === 2 ? <p className="game-v2-take-sheet__warning">{t('takeWarning')}</p> : null}<div className="game-v2-take-sheet__actions"><button className="game-v2-button game-v2-button--secondary" type="button" disabled={taking} onClick={onCancel}>{t('cancel')}</button><button className="game-v2-button game-v2-button--danger" type="button" disabled={taking} onClick={onConfirm}>{taking ? <span className="spinner"/> : <HandCards size={19}/>} {t('takeHand', { name: target.name, count: target.cardCount })}</button></div></AccessibleDialog>
 }
 
@@ -160,13 +160,13 @@ function reactionLabel(reaction: Reaction, t: TFunction): string {
   return t('reactionGoodMove')
 }
 
-function PreferenceDialog({ language, t, preferences, isHost, chatSupported, chatMode, chatModeBusy, onLanguage, onPreference, onChatMode, onClose }: { language: Language; t: TFunction; preferences: Preferences; isHost: boolean; chatSupported: boolean; chatMode: ChatMode; chatModeBusy: boolean; onLanguage: (language: Language) => void; onPreference: <K extends keyof Preferences>(key: K, value: Preferences[K]) => void; onChatMode: (chatMode: ChatMode) => void; onClose: () => void }) {
+export function PreferenceDialog({ language, t, preferences, isHost, chatSupported, chatMode, chatModeBusy, onLanguage, onPreference, onChatMode, onClose }: { language: Language; t: TFunction; preferences: Preferences; isHost: boolean; chatSupported: boolean; chatMode: ChatMode; chatModeBusy: boolean; onLanguage: (language: Language) => void; onPreference: <K extends keyof Preferences>(key: K, value: Preferences[K]) => void; onChatMode: (chatMode: ChatMode) => void; onClose: () => void }) {
   return <AccessibleDialog labelId="preference-title" className="preference-sheet" onClose={onClose}><div className="sheet-header"><div><span className="game-v2-eyebrow">Bhabhi Thulla</span><h2 id="preference-title">{t('settings')}</h2></div><IconButton label={t('close')} onClick={onClose}><X size={21}/></IconButton></div><label className="preference-row"><span>{t('language')}</span><select value={language} onChange={(event) => onLanguage(event.target.value as Language)}><option value="en">{t('english')}</option><option value="roman">{t('romanUrdu')}</option><option value="ur">{t('urdu')}</option></select></label><label className="preference-row"><span><Volume size={18}/> {t('sound')}</span><input type="checkbox" checked={preferences.sound} onChange={(event) => onPreference('sound', event.target.checked)}/></label><label className="preference-row"><span><Wifi size={18}/> {t('haptics')}</span><input type="checkbox" checked={preferences.haptics} onChange={(event) => onPreference('haptics', event.target.checked)}/></label><label className="preference-row"><span><Message size={18}/> {t('muteReactions')}</span><input type="checkbox" checked={preferences.reactionsMuted} onChange={(event) => onPreference('reactionsMuted', event.target.checked)}/></label>{chatSupported ? <label className="preference-row"><span><Message size={18}/> {t('muteChatNotifications')}</span><input type="checkbox" checked={preferences.chatNotificationsMuted} onChange={(event) => onPreference('chatNotificationsMuted', event.target.checked)}/></label> : null}{chatSupported && isHost ? <label className="preference-row"><span>{t('chatMode')}</span><select value={chatMode} disabled={chatModeBusy} onChange={(event) => onChatMode(event.target.value as ChatMode)}><option value="text">{t('chatTextAndQuick')}</option><option value="quick">{t('chatQuickOnly')}</option><option value="off">{t('chatOff')}</option></select></label> : null}<button className="game-v2-button game-v2-button--primary game-v2-button--wide" type="button" onClick={onClose}>{t('save')}</button></AccessibleDialog>
 }
 
-type ResultBusyAction = 'ready' | 'restart' | 'reset' | 'remove-waiting' | 'add-bot' | 'replace-bot' | null
+export type ResultBusyAction = 'ready' | 'restart' | 'reset' | 'remove-waiting' | 'add-bot' | 'replace-bot' | null
 
-function RoundResult({ room, me, loser, connected, busyAction, t, onReady, onRestart, onReset, onRemoveWaiting, onAddBot, onInvite, onLeave }: {
+export function RoundResult({ room, me, loser, connected, busyAction, t, onReady, onRestart, onReset, onRemoveWaiting, onAddBot, onInvite, onLeave }: {
   room: ClientRoomView
   me: Player
   loser?: Player
@@ -251,7 +251,7 @@ function RoundResult({ room, me, loser, connected, busyAction, t, onReady, onRes
   </div></div>
 }
 
-function playAttentionTone(frequency = 660) {
+export function playAttentionTone(frequency = 660) {
   try {
     const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
     if (!AudioContextClass) return

@@ -47,6 +47,12 @@ const fixtureShortMatrix = {
   reconnect: ['phone-320x480', 'landscape-740x360'],
   finished: ['phone-320x480', 'landscape-740x360'],
   'finished-waiting': ['phone-320x480', 'landscape-740x360'],
+  'party-phone': ['phone-320x480', 'phone-375x512', 'phone-390x667', 'landscape-667x375'],
+  'party-phone-resolving': ['phone-320x480', 'landscape-667x375'],
+  'party-phone-waiting': ['phone-320x480', 'landscape-667x375'],
+  'party-phone-reconnect': ['phone-320x480', 'landscape-667x375'],
+  'party-phone-offline-board': ['phone-320x480', 'landscape-667x375'],
+  'party-phone-finished': ['phone-320x480', 'landscape-667x375'],
 }
 const chromeCandidates = [
   process.env.CHROME_PATH,
@@ -301,10 +307,10 @@ const diagnosticsExpression = `(() => {
   const lobbyHeaderOverflow = document.querySelector('.header-overflow')
   const clock = document.querySelector('.game-v2-clock, .turn-clock')
   const clockStyle = clock ? getComputedStyle(clock) : null
-  const selectedCard = document.querySelector('.game-v2-hand button.game-card.is-selected[aria-pressed="true"]')
+  const selectedCard = document.querySelector('.game-v2-hand button.game-card.is-selected[aria-pressed="true"], .party-controller__hand button.game-card.is-selected[aria-pressed="true"]')
   const selectedCardRect = selectedCard?.getBoundingClientRect()
   const selectedCardScroller = selectedCard?.closest('.game-v2-hand__scroller')
-  const gameActionBar = document.querySelector('.game-v2-action-bar')
+  const gameActionBar = document.querySelector('.game-v2-action-bar, .party-controller__action-dock')
   const gameActionBarRect = gameActionBar?.getBoundingClientRect()
   const lobbyActionSecondary = document.querySelector('.lobby-actions__secondary[data-action-group="secondary"]')
   const lobbyActionPrimary = document.querySelector('.lobby-actions__primary[data-action-group="primary"]')
@@ -316,6 +322,26 @@ const diagnosticsExpression = `(() => {
   const qaToastRect = qaToast?.getBoundingClientRect()
   const gameResultControls = document.querySelector('.game-v2-result__controls')
   const resultActionElements = [...document.querySelectorAll('.game-v2-result [data-result-action]')]
+  const partyController = document.querySelector('.party-controller[data-party-private-controller="true"]')
+  const partyControllerHeader = partyController?.querySelector('.party-controller__header')
+  const partyControllerStatus = partyController?.querySelector('.party-controller__status, .party-controller__waiting')
+  const partyControllerHand = partyController?.querySelector('.party-controller__hand')
+  const partyControllerDock = partyController?.querySelector('.party-controller__action-dock')
+  const partyControllerPrivacy = partyController?.querySelector('.party-controller__privacy')
+  const partyControllerHeaderRect = partyControllerHeader?.getBoundingClientRect()
+  const partyControllerStatusRect = partyControllerStatus?.getBoundingClientRect()
+  const partyControllerHandRect = partyControllerHand?.getBoundingClientRect()
+  const partyControllerDockRect = partyControllerDock?.getBoundingClientRect()
+  const partyControllerPrivacyRect = partyControllerPrivacy?.getBoundingClientRect()
+  const partyControllerLegalCards = [...(partyController?.querySelectorAll('.party-controller__hand button.game-card:not(:disabled)') ?? [])]
+  const partyControllerLegalCardReachable = partyControllerLegalCards.some((card) => {
+    const box = card.getBoundingClientRect()
+    const visibleLeft = Math.max(0, box.left)
+    const visibleRight = Math.min(innerWidth, box.right)
+    const visibleTop = Math.max(0, box.top)
+    const visibleBottom = Math.min(innerHeight, partyControllerDockRect?.top ?? innerHeight, box.bottom)
+    return visibleRight - visibleLeft >= 44 && visibleBottom - visibleTop >= 44
+  })
   const parseRgb = (value) => (value?.match(/-?\\d*\\.?\\d+/g) ?? []).slice(0, 3).map(Number)
   const relativeLuminance = (value) => {
     const channels = parseRgb(value).map((channel) => {
@@ -410,7 +436,7 @@ const diagnosticsExpression = `(() => {
   const fixedControlsClipped = fixedControls
     .filter((element) => !fullyInsideViewport(element.getBoundingClientRect()))
     .map(describeElement)
-  const gamePrimaryAction = document.querySelector('.game-v2-action-bar button:not(:disabled), .game-v2-waiting-player button:not(:disabled), .game-v2-result__controls > .game-v2-button:not(:disabled), .game-v2-reconnect-banner button:not(:disabled), .game-v2-explanation-toggle')
+  const gamePrimaryAction = document.querySelector('.game-v2-action-bar button:not(:disabled), .party-controller__action-dock button:not(:disabled), .party-controller__waiting button:not(:disabled), .party-controller__status button:not(:disabled), .game-v2-waiting-player button:not(:disabled), .game-v2-result__controls > .game-v2-button:not(:disabled), .game-v2-reconnect-banner button:not(:disabled), .game-v2-explanation-toggle')
   const gamePrimaryActionRect = gamePrimaryAction?.getBoundingClientRect()
   const lobbyPrimaryAction = document.querySelector('.lobby-actions__primary .lobby-actions__deal')
   const lobbyPrimaryActionRect = lobbyPrimaryAction?.getBoundingClientRect()
@@ -439,6 +465,14 @@ const diagnosticsExpression = `(() => {
     ? landingPrimaryActionReachable
     : document.querySelector('.lobby-shell')
       ? lobbyPrimaryActionReachable
+      : partyController
+        ? gameResultRect
+          ? fullyInsideViewport(gameResultRect)
+          : Boolean(fullyInsideViewport(partyControllerHeaderRect)
+            && partyControllerStatus
+            && visible(partyControllerStatus)
+            && (!partyControllerHand || visible(partyControllerHand))
+            && (!partyControllerDockRect || fullyInsideViewport(partyControllerDockRect)))
       : document.querySelector('.game-v2-shell')
         ? Boolean(gamePrimarySurfacesFullyVisible
           && (gameResult || (gameHeader && visible(gameHeader) && gameSurfaceVisible && gamePhaseSurfaceVisible))
@@ -592,6 +626,17 @@ const diagnosticsExpression = `(() => {
       .filter((element) => !gameResultControls?.contains(element))
       .map(describeElement),
     resultBlockerPresent: Boolean(document.querySelector('.game-v2-result__blocker[role="status"]')),
+    partyControllerPresent: Boolean(partyController),
+    partyControllerHeaderFullyVisible: fullyInsideViewport(partyControllerHeaderRect),
+    partyControllerStatusVisible: Boolean(partyControllerStatus && visible(partyControllerStatus)),
+    partyControllerHandVisible: Boolean(partyControllerHand && visible(partyControllerHand)),
+    partyControllerDockFullyVisible: partyControllerDockRect ? fullyInsideViewport(partyControllerDockRect) : null,
+    partyControllerLegalCardReachable,
+    partyControllerUtilityOverlap: overlaps(partyControllerPrivacyRect, tableTalkTriggerRect),
+    partyControllerPublicSurfaceCount: partyController?.querySelectorAll('.game-v2-table, .game-v2-opponents, .game-v2-trick, .game-v2-waste, .party-board__table, .party-board__trick, .party-board__waste').length ?? 0,
+    partyControllerPrivateCardCount: partyController?.querySelectorAll('.party-controller__hand .game-card').length ?? 0,
+    partyControllerHandScrollOwnerCount: partyController?.querySelectorAll('[data-scroll-owner="private-hand"]').length ?? 0,
+    partyControllerActionDockCount: partyController?.querySelectorAll('[data-controller-actions="true"]').length ?? 0,
     matchLogText: document.querySelector('.game-v2-activity')?.textContent?.trim().replace(/\\s+/g, ' ') ?? '',
     handVisible: Boolean(document.querySelector('.game-v2-hand') && visible(document.querySelector('.game-v2-hand'))),
     liveReactionVisible: Boolean(document.querySelector('.game-v2-live-reaction')),
@@ -855,10 +900,10 @@ async function removeQaToast(cdp) {
 
 async function selectVisibleQaCard(cdp) {
   const selected = await evaluate(cdp, `(() => {
-    const scroller = document.querySelector('.game-v2-hand__scroller')
+    const scroller = document.querySelector('.game-v2-hand__scroller, .party-controller__hand-scroll')
     if (!scroller) return false
     const scrollerRect = scroller.getBoundingClientRect()
-    const cards = [...document.querySelectorAll('.game-v2-hand button.game-card--selectable:not(:disabled)')]
+    const cards = [...document.querySelectorAll('.game-v2-hand button.game-card--selectable:not(:disabled), .party-controller__hand button.game-card--selectable:not(:disabled)')]
       .filter((card) => {
         const rect = card.getBoundingClientRect()
         return rect.left >= scrollerRect.left - 1 && rect.right <= scrollerRect.right + 1
@@ -874,7 +919,7 @@ async function selectVisibleQaCard(cdp) {
     return Boolean(cards[0])
   })()`)
   if (!selected) throw new Error('Could not select a fully visible card for clipping QA.')
-  await waitForExpression(cdp, `Boolean(document.querySelector('.game-v2-hand button.game-card.is-selected[aria-pressed="true"]'))`)
+  await waitForExpression(cdp, `Boolean(document.querySelector('.game-v2-hand button.game-card.is-selected[aria-pressed="true"], .party-controller__hand button.game-card.is-selected[aria-pressed="true"]'))`)
 }
 
 async function revealTableTalkPlayerControls(cdp) {
@@ -1295,11 +1340,17 @@ try {
     { mode: 'reconnect', selector: '.game-v2-reconnect-banner' },
     { mode: 'finished', selector: '.game-v2-result' },
     { mode: 'finished-waiting', selector: '.game-v2-result__waiting' },
+    { mode: 'party-phone', selector: '.party-controller[data-party-private-controller="true"]' },
+    { mode: 'party-phone-resolving', selector: '.party-controller.is-resolving' },
+    { mode: 'party-phone-waiting', selector: '.party-controller.is-waiting' },
+    { mode: 'party-phone-reconnect', selector: '.party-controller.is-reconnecting' },
+    { mode: 'party-phone-offline-board', selector: '.party-controller[data-party-private-controller="true"]' },
+    { mode: 'party-phone-finished', selector: '.party-controller .game-v2-result' },
   ]
   const fixtureResults = {}
   for (const fixture of fixtureDefinitions) {
     const fixtureUrl = `${CLIENT_URL}/?qa=${fixture.mode}`
-    const fixturePrepare = fixture.mode === 'playing'
+    const fixturePrepare = fixture.mode === 'playing' || fixture.mode === 'party-phone'
       ? async () => { await selectVisibleQaCard(cdp); await injectQaToast(cdp) }
       : fixture.mode === 'lobby'
         ? async () => injectQaToast(cdp)
@@ -1317,7 +1368,7 @@ try {
     }
     const portrait = await captureFreshFixture(`fixture-${fixture.mode}-mobile`, 390, 844)
     const landscape = await captureFreshFixture(`fixture-${fixture.mode}-landscape`, 844, 390)
-    const narrow = ['lobby', 'playing', 'many-players'].includes(fixture.mode)
+    const narrow = ['lobby', 'playing', 'many-players'].includes(fixture.mode) || fixture.mode.startsWith('party-phone')
       ? await captureFreshFixture(`fixture-${fixture.mode}-narrow`, 320, 740)
       : null
     const desktop = fixture.mode === 'resolving' ? await captureFreshFixture(`fixture-${fixture.mode}-desktop`, 1366, 768) : null
@@ -1364,6 +1415,33 @@ try {
     }
     for (const result of Object.values(shortScreens)) {
       assertShortViewport(result, `${fixture.mode} fixture at ${result.viewport.join('x')}`)
+    }
+    if (fixture.mode.startsWith('party-phone')) {
+      for (const result of [portrait, landscape, narrow, ...Object.values(shortScreens)].filter(Boolean)) {
+        const context = `${fixture.mode} private controller at ${result.viewport.join('x')}`
+        assert(result.partyControllerPresent, `${context} did not render the phone controller.`)
+        if (fixture.mode !== 'party-phone-finished') assert(result.partyControllerHeaderFullyVisible && result.partyControllerStatusVisible, `${context} clips its header or status.`)
+        assert(!result.partyControllerUtilityOverlap, `${context} overlaps Table Talk with the private-hand notice.`)
+        assert(result.partyControllerPublicSurfaceCount === 0, `${context} leaked ${result.partyControllerPublicSurfaceCount} public-table surfaces onto the phone.`)
+        if (!['party-phone-waiting', 'party-phone-finished'].includes(fixture.mode)) {
+          assert(result.partyControllerHandVisible, `${context} does not show the private hand.`)
+          assert(result.partyControllerPrivateCardCount > 0, `${context} does not render the player's private cards.`)
+          assert(result.partyControllerHandScrollOwnerCount === 1, `${context} does not expose exactly one private-hand scroll owner.`)
+        }
+        if (fixture.mode === 'party-phone' || fixture.mode === 'party-phone-offline-board') {
+          assert(result.partyControllerActionDockCount === 1 && result.partyControllerDockFullyVisible, `${context} does not keep its action dock fully visible.`)
+        }
+        if (fixture.mode === 'party-phone-finished') {
+          assert(result.resultBlockerPresent, `${context} does not expose the rematch blocker.`)
+          assert(['ready', 'invite', 'leave', 'add-bot'].every((action) => result.resultActionNames.includes(action)), `${context} is missing a required result action.`)
+        }
+      }
+      if (fixture.mode === 'party-phone') {
+        assert(portrait.selectedCardPresent && portrait.selectedCardVisible, 'Party controller QA did not exercise a selected private card.')
+        for (const result of [portrait, landscape, narrow, ...Object.values(shortScreens)].filter(Boolean)) {
+          assert(result.partyControllerLegalCardReachable, `Party controller at ${result.viewport.join('x')} does not leave a legal card with a 44px tappable area above the action dock.`)
+        }
+      }
     }
     if (chatOpen) {
       for (const result of Object.values(chatOpen)) {
@@ -1520,6 +1598,8 @@ try {
   assert(/cancel readiness/i.test(fixtureResults.finished.portrait.readinessActionText), `The finished-round ready action is ambiguous: ${fixtureResults.finished.portrait.readinessActionText}`)
   assert(!fixtureResults.finished.portrait.handVisible, 'The finished-round result leaves the old hand visible.')
   assert(!fixtureResults.finished.landscape.handVisible, 'The landscape finished-round result leaves the old hand visible.')
+
+  if (failures.length) throw new Error(`Deterministic visual QA failed before live multiplayer checks: ${failures.join(' | ')}`)
 
   await cdp.send('Page.navigate', { url: CLIENT_URL })
   await waitForExpression(cdp, `Boolean(document.querySelector('.landing-shell'))`)

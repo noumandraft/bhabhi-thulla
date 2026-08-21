@@ -57,6 +57,7 @@ const DEFAULT_SERVER = window.location.hostname === 'localhost' ? 'http://localh
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || DEFAULT_SERVER
 const QA_FIXTURES_ENABLED = import.meta.env.DEV || import.meta.env.VITE_ENABLE_QA_FIXTURES === 'true'
 const PartyBoardExperience = lazy(() => import('./components/party/PartyBoard').then((module) => ({ default: module.PartyBoardExperience })))
+const PartyPhoneController = lazy(() => import('./components/party/PartyPhoneController'))
 const LANGUAGES: Language[] = ['en', 'roman', 'ur']
 export type ToastTone = 'success' | 'error' | 'info'
 type ToastNotice = { message: string; tone: ToastTone }
@@ -766,7 +767,7 @@ export default function App() {
   }
 
   const tableTalkControl = displayedRoom && tableTalkAvailable && (quickTalkEnabled || textTalkEnabled) ? <TableTalk
-    className={`table-talk--${displayedRoom.status === 'lobby' ? 'lobby table-talk--in-header' : 'game'}`}
+    className={`table-talk--${displayedRoom.status === 'lobby' ? 'lobby table-talk--in-header' : displayedRoom.mode === 'party' ? 'game table-talk--party-controller' : 'game'}`}
     open={tableTalkOpen}
     unreadCount={unreadChatCount}
     messages={chatMessages}
@@ -803,9 +804,9 @@ export default function App() {
   if (reconnecting && !displayedRoom) return <main className="loading-screen"><Logo/><span className="spinner spinner--large"/><div className="loading-screen__copy"><p>{t('findingSeat')}</p>{restoreElapsed >= 8 ? <small>{t('findingSeatElapsed', { count: restoreElapsed })}</small> : null}</div>{restoreElapsed >= 12 ? <div className="loading-screen__actions"><button className="button button--primary" type="button" onClick={() => { socket.disconnect(); socket.connect(); setRestoreElapsed(0) }}>{t('retryConnection')}</button><button className="button button--secondary" type="button" onClick={() => clearSeat(credentials?.code, t('seatRestoreAbandoned'))}>{t('forgetSavedSeat')}</button></div> : null}</main>
 
   return <>
-    {!displayedRoom ? <><Landing socket={socket} connected={connected} inviteCode={inviteCode} partySupported={partySupported} partyDiscoverable={partyDiscoverable} t={t} language={language} onLanguage={setLanguage} onEntered={entered} onOpenPartyBoard={() => setPartyBoardOpen(true)} onOpenRules={openRules} onOpenTutorial={openTutorial} onToast={showToast}/>{entryError ? <div className="entry-banner" role="alert">{entryError}</div> : null}</> : displayedRoom.status === 'lobby' ? <Lobby room={displayedRoom} socket={socket} t={t} language={language} chatSupported={chatSupported} tableTalkControl={tableTalkControl} onLanguage={setLanguage} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/> : <GameTable room={displayedRoom} socket={socket} connected={connected} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} preferences={preferences} onPreference={updatePreference} liveReaction={visibleReaction} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/>}
+    {!displayedRoom ? <><Landing socket={socket} connected={connected} inviteCode={inviteCode} partySupported={partySupported} partyDiscoverable={partyDiscoverable} t={t} language={language} onLanguage={setLanguage} onEntered={entered} onOpenPartyBoard={() => setPartyBoardOpen(true)} onOpenRules={openRules} onOpenTutorial={openTutorial} onToast={showToast}/>{entryError ? <div className="entry-banner" role="alert">{entryError}</div> : null}</> : displayedRoom.status === 'lobby' ? <Lobby room={displayedRoom} socket={socket} t={t} language={language} chatSupported={chatSupported} tableTalkControl={tableTalkControl} onLanguage={setLanguage} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/> : displayedRoom.mode === 'party' ? <Suspense fallback={<main className="loading-screen"><Logo/><span className="spinner spinner--large"/><p>{t('partyController')}</p></main>}><PartyPhoneController room={displayedRoom} socket={socket} connected={connected} t={t} language={language} chatSupported={chatSupported} tableTalkControl={tableTalkControl} onLanguage={setLanguage} preferences={preferences} onPreference={updatePreference} liveReaction={visibleReaction} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/></Suspense> : <GameTable room={displayedRoom} socket={socket} connected={connected} t={t} language={language} chatSupported={chatSupported} onLanguage={setLanguage} preferences={preferences} onPreference={updatePreference} liveReaction={visibleReaction} onOpenRules={openRules} onLeave={leaveRoom} onToast={showToast}/>}
     {displayedRoom?.status === 'lobby' && visibleReaction && !preferences.reactionsMuted ? <div className={`table-talk__lobby-reaction ${tableTalkOpen ? 'is-drawer-open' : ''}`} role="status" aria-live="polite"><b><bdi dir="auto">{visibleReaction.playerId === displayedRoom.yourPlayerId ? t('you') : visibleReaction.playerName}</bdi></b><span>{reactionLabel(visibleReaction.reaction, t)}</span></div> : null}
-    {displayedRoom?.status !== 'lobby' ? tableTalkControl : null}
+    {displayedRoom?.status !== 'lobby' && displayedRoom?.mode !== 'party' ? tableTalkControl : null}
     {!auxiliaryOverlaysBlocked && rulesOpen ? <RulesModal t={t} onClose={() => setRulesOpen(false)}/> : null}
     {!auxiliaryOverlaysBlocked && tutorialOpen ? <Tutorial t={t} onClose={() => setTutorialOpen(false)} onComplete={() => updatePreference('tutorialComplete', true)}/> : null}
     {toast ? <div className={`toast toast--${toast.tone}`} data-tone={toast.tone} role={toast.tone === 'error' ? 'alert' : 'status'} aria-live={toast.tone === 'error' ? 'assertive' : 'polite'}>{toast.tone === 'success' ? <Check size={18}/> : toast.tone === 'error' ? <CircleAlert size={18}/> : <Info size={18}/>} {toast.message}</div> : null}

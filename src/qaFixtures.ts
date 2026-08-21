@@ -38,6 +38,13 @@ function base(): ClientRoomView {
 export function makeQaRoom(mode: string | null): ClientRoomView | null {
   if (!mode) return null
   const room = base()
+  if (mode === 'party-phone' || mode.startsWith('party-phone-')) {
+    room.mode = 'party'
+    room.partyBoardConnected = mode !== 'party-phone-offline-board'
+    mode = mode === 'party-phone' || mode === 'party-phone-offline-board'
+      ? 'playing'
+      : mode.slice('party-phone-'.length)
+  }
   if (mode === 'lobby') {
     room.status = 'lobby'; room.canStart = true; room.startBlockReason = null; room.game = null
     return room

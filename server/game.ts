@@ -295,6 +295,28 @@ function nextActive(room: Room, playerId: string): Player | null {
   return null
 }
 
+/**
+ * The turn the UI may safely announce in advance.
+ *
+ * The final play of a normal trick can change the next leader (or create a
+ * THULLA), so it deliberately returns null until resolution has decided it.
+ * The opening trick is the exception: the Ace of Spades opener is known to
+ * retain power before the final opening card is played.
+ */
+function announcedNextTurnId(room: Room): string | null {
+  const game = room.game
+  if (!game) return null
+  if (game.phase === 'resolving') return game.pendingTurnId
+  if (game.phase !== 'turn' || !game.currentTurnId) return null
+
+  const activeCount = activePlayers(room).length
+  const currentFinishesTrick = activeCount > 0 && game.trick.length + 1 >= activeCount
+  if (currentFinishesTrick) return game.firstTrick ? game.leaderId : null
+
+  const next = nextActive(room, game.currentTurnId)
+  return next?.id === game.currentTurnId ? null : next?.id ?? null
+}
+
 function highestLedCard(trick: TrickCard[], leadSuit: Suit): TrickCard {
   const suited = trick.filter((entry) => entry.card.suit === leadSuit)
   if (!suited.length) throw new Error('The trick has no card in the led suit.')
@@ -418,7 +440,7 @@ export class GameManager {
       }))
       for (const player of restored.players) this.ensureScore(restored, player)
       restored.suspended = restored.status === 'playing'
-      if (restored.game) this.normalizeRestoredGame(restored.game)
+      if (restored.game) this.normalizeRestoredGame(restored)
       this.rooms.set(restored.code, restored)
     }
   }
@@ -470,7 +492,8 @@ export class GameManager {
     this.publisher = publisher
   }
 
-  private normalizeRestoredGame(game: GameState): void {
+  private normalizeRestoredGame(room: Room): void {
+    const game = room.game!
     game.phase ??= game.resolvedTrick ? 'resolving' : 'turn'
     game.resolutionEndsAt ??= null
     game.pendingTurnId ??= null
@@ -484,6 +507,16 @@ export class GameManager {
     game.roundPlayerIds ??= []
     game.scoreRecorded ??= false
     game.turnEndsAt = null
+    // Rooms saved while the former waste-lead rule was active may still carry
+    // a pending automatic draw. Convert that transition to the current rule:
+    // the empty-handed winner escapes and the next active right-hand seat leads.
+    if (game.pendingWasteLeadPlayerId) {
+      const formerWinner = room.players.find((player) => player.id === game.pendingWasteLeadPlayerId)
+      if (formerWinner?.hand.length === 0 && !formerWinner.escaped) this.markEscaped(room, formerWinner)
+      if (formerWinner) game.pendingTurnId = nextActive(room, formerWinner.id)?.id ?? game.pendingTurnId
+      game.pendingLoserId = this.onlyRemainingPlayerId(room)
+      game.pendingWasteLeadPlayerId = null
+    }
     if (game.phase === 'waiting_for_reconnect') {
       game.turnRemainingMs ??= 0
     }
@@ -1227,12 +1260,16 @@ export class GameManager {
     const completed = [...game.trick]
     const winnerEntry = highestLedCard(completed, game.leadSuit!)
     const winner = this.requirePlayer(room, winnerEntry.playerId)
-    this.escapeEmptyPlayers(room, winner.id, completed.map((entry) => entry.playerId))
+    const activeBeforeEscape = activePlayers(room)
+    const everyRemainingHandIsEmpty = activeBeforeEscape.length > 1
+      && activeBeforeEscape.every((player) => player.hand.length === 0)
+    const simultaneousLoserId = everyRemainingHandIsEmpty
+      ? [...completed].reverse().find((entry) => entry.playerId !== winner.id)?.playerId ?? null
+      : null
+    this.escapeEmptyPlayers(room, simultaneousLoserId, completed.map((entry) => entry.playerId))
     const loserId = this.onlyRemainingPlayerId(room)
-    const needsWasteLead = !loserId && winner.hand.length === 0
-    if (needsWasteLead) {
-      addActivity(game, `${winner.name} kept the power and will draw a card from the waste to lead.`, 'warning', 'power', { winnerId: winner.id })
-    } else if (!loserId) {
+    const nextLeader = winner.escaped ? nextActive(room, winner.id) : winner
+    if (!loserId && !winner.escaped) {
       addActivity(game, `${winner.name} won the trick and has the power.`, 'neutral', 'power', { winnerId: winner.id })
     }
     this.beginResolution(room, {
@@ -1240,7 +1277,7 @@ export class GameManager {
       kind: 'clean',
       winnerId: winner.id,
       lastPlayerId: completed[completed.length - 1].playerId,
-    }, winner.id, loserId, needsWasteLead ? winner.id : null, completed.map((entry) => entry.card))
+    }, nextLeader?.id ?? winner.id, loserId, completed.map((entry) => entry.card))
   }
 
   private beginResolution(
@@ -1248,7 +1285,6 @@ export class GameManager {
     resolved: ResolvedTrick,
     pendingTurnId: string,
     pendingLoserId: string | null = null,
-    pendingWasteLeadPlayerId: string | null = null,
     pendingWasteCards: Card[] = [],
   ): void {
     const game = room.game!
@@ -1257,7 +1293,7 @@ export class GameManager {
     game.resolutionEndsAt = Date.now() + TRICK_RESOLUTION_MS
     game.pendingTurnId = pendingTurnId
     game.pendingLoserId = pendingLoserId
-    game.pendingWasteLeadPlayerId = pendingWasteLeadPlayerId
+    game.pendingWasteLeadPlayerId = null
     game.pendingWasteCards = pendingWasteCards
     game.trick = []
     game.leadSuit = null
@@ -1275,7 +1311,6 @@ export class GameManager {
     if (!game || game.phase !== 'resolving') return
     const pendingTurnId = game.pendingTurnId
     const pendingLoserId = game.pendingLoserId
-    const wasteLeaderId = game.pendingWasteLeadPlayerId
     const pendingWasteCards = game.pendingWasteCards
     game.resolvedTrick = null
     game.resolutionEndsAt = null
@@ -1293,20 +1328,10 @@ export class GameManager {
     game.phase = 'turn'
     game.currentTurnId = pendingTurnId
     game.turnEndsAt = null
-    if (wasteLeaderId) {
-      if (!game.waste.length) throw new Error('No waste card is available for the power lead.')
-      const drawnIndex = randomInt(game.waste.length)
-      const [drawn] = game.waste.splice(drawnIndex, 1)
-      game.trick = [{ playerId: wasteLeaderId, card: drawn }]
-      game.leadSuit = drawn.suit
-      game.leaderId = wasteLeaderId
-      game.currentTurnId = nextActive(room, wasteLeaderId)?.id ?? null
-      game.takeUsedForLead = true
-    }
     game.waste.push(...pendingWasteCards)
   }
 
-  private escapeEmptyPlayers(room: Room, exceptPlayerId: string, trickOrder: string[] = []): void {
+  private escapeEmptyPlayers(room: Room, exceptPlayerId: string | null, trickOrder: string[] = []): void {
     const orderedIds = [...new Set(trickOrder)]
     const orderedPlayers = [
       ...orderedIds
@@ -1497,6 +1522,7 @@ export class GameManager {
               : null,
             resolutionEndsAt: game.resolutionEndsAt,
             pendingTurnId: game.pendingTurnId,
+            nextTurnId: announcedNextTurnId(room),
             leadSuit: game.leadSuit,
             currentTurnId: game.currentTurnId,
             leaderId: game.leaderId,
@@ -1581,6 +1607,7 @@ export class GameManager {
               : null,
             resolutionEndsAt: game.resolutionEndsAt,
             pendingTurnId: game.pendingTurnId,
+            nextTurnId: announcedNextTurnId(room),
             leadSuit: game.leadSuit,
             currentTurnId: game.currentTurnId,
             leaderId: game.leaderId,

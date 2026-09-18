@@ -110,6 +110,11 @@ function clientIp(socket: Socket): string {
   return firstForwarded?.trim() || socket.handshake.address || 'unknown'
 }
 
+function clientRelease(socket: Socket): string {
+  const value = socket.handshake.auth?.clientRelease
+  return typeof value === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(value) ? value : 'legacy'
+}
+
 function originsFrom(environment: NodeJS.ProcessEnv): string[] | true {
   const values = (environment.CLIENT_ORIGIN ?? 'http://localhost:5173')
     .split(',')
@@ -229,6 +234,7 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
         event,
         category: safeErrorCategory(message),
         version: buildVersion,
+        clientRelease: clientRelease(socket),
         correlationId: processCorrelationId,
       })
       respond?.({ ok: false, error: message })
@@ -292,6 +298,7 @@ export async function createGameServer(environment: NodeJS.ProcessEnv = process.
     const usesReadyProtocol = socket.handshake.auth?.protocolVersion === PROTOCOL_VERSION
     socket.emit('server:hello', {
       protocolVersion: PROTOCOL_VERSION,
+      serverVersion: buildVersion,
       capabilities: ['chat-v1', 'party-v1'],
       partyMode,
       serverNow: Date.now(),

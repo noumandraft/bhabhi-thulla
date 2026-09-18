@@ -25,7 +25,7 @@ function connectedSocket(url: string, usesReadyProtocol = true): Promise<Socket>
       transports: ['websocket'],
       forceNew: true,
       extraHeaders: { Origin: 'http://localhost:5173' },
-      auth: usesReadyProtocol ? { protocolVersion: PROTOCOL_VERSION } : {},
+      auth: usesReadyProtocol ? { protocolVersion: PROTOCOL_VERSION, clientRelease: 'test-release' } : {},
     }) as ObservedSocket
     socket.on('server:hello', (hello: ServerHello) => { socket.observedHello = hello })
     socket.once('connect', () => fulfill(socket))
@@ -106,6 +106,7 @@ describe('Socket.IO server protocol', () => {
     sockets.push(await connectedSocket(url), await connectedSocket(url), await connectedSocket(url))
     expect((sockets[0] as ObservedSocket).observedHello).toEqual({
       protocolVersion: PROTOCOL_VERSION,
+      serverVersion: 'development',
       capabilities: ['chat-v1', 'party-v1'],
       partyMode: 'off',
       serverNow: expect.any(Number),
@@ -918,6 +919,7 @@ describe('Socket.IO server protocol', () => {
         '127.0.0.1',
       ]) expect(logs).not.toContain(forbidden)
       expect(logs).toContain('safe-build-version')
+      expect(logs).toContain('test-release')
       expect(logs).toContain('correlationId')
       expect(logs).toContain('socket_action_rejected')
       expect(logs).toContain('party_board_created')

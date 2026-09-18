@@ -139,6 +139,8 @@ export interface RoomView {
     resolvedTrick: ResolvedTrickView | null
     resolutionEndsAt: number | null
     pendingTurnId: string | null
+    /** Server-authoritative player who acts after the current state clears. */
+    nextTurnId: string | null
     leadSuit: Suit | null
     currentTurnId: string | null
     leaderId: string | null
@@ -209,6 +211,8 @@ export interface PartyBoardGameView {
   resolvedTrick: ResolvedTrickView | null
   resolutionEndsAt: number | null
   pendingTurnId: string | null
+  /** Server-authoritative player who acts after the current state clears. */
+  nextTurnId: string | null
   leadSuit: Suit | null
   currentTurnId: string | null
   leaderId: string | null
@@ -244,6 +248,7 @@ export interface RoomLeaveResult {
 
 export interface ServerHello {
   protocolVersion: typeof PROTOCOL_VERSION
+  serverVersion?: string
   capabilities?: ServerCapability[]
   partyMode?: PartyAvailability
   serverNow?: number
